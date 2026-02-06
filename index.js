@@ -37,7 +37,7 @@ async function parseTransaction(text) {
       {
         role: "system",
         content:
-          "You are a strict financial message parser. You MUST output a JSON object with exactly these keys: type, amount, description. No other keys are allowed. If any value is missing or ambiguous, output {\"error\":\"ambiguous\"}."
+          "You are a strict financial message parser. You MUST output a JSON object with exactly these keys: type, amount, description. No other keys are allowed. If any value is missing or ambiguous, output {\"error\":\"ambiguous\"}. Portuguese language only. Examples:\n\nInput: 'Paguei 500 Kz de almoço'\nOutput: {\"type\":\"expense\",\"amount\":500,\"description\":\"almoço\"}\n\nInput: 'Recebi 2000 Kz do João'\nOutput: {\"type\":\"income\",\"amount\":2000,\"description\":\"do João\"}\n\nInput: 'Comprei pão'\nOutput: {\"error\":\"ambiguous\"}"
       },
       {
         role: "user",
@@ -50,15 +50,6 @@ async function parseTransaction(text) {
   console.log("LLM RAW:", parsed);
   
   return JSON.parse(parsed);
-}
-
-if (
-  !parsed.type ||
-  typeof parsed.amount !== "number" ||
-  !parsed.description
-) {
-  await reply(from, "Não percebi. Reescreve a frase.");
-  return res.sendStatus(200);
 }
 
 async function reply(to, body) {
@@ -122,11 +113,18 @@ app.post("/webhook", async (req, res) => {
   try {
     const parsed = await parseTransaction(text);
 
-    if (parsed.error) {
-      await reply(from, "Não percebi. Reescreve a frase.");
-      return res.sendStatus(200);
+    if (
+      !parsed.type ||
+      typeof parsed.amount !== "number" ||
+      !parsed.description
+    ) {
+    await reply(from, "Não percebi. Reescreve a frase.");
+    return res.sendStatus(200);
     }
 
+    parsed.amount = Number(parsed.amount);
+    parsed.description = parsed.description.trim();
+    
     session.state = "AWAITING_CONFIRMATION";
     session.pending = parsed;
 
@@ -134,7 +132,8 @@ app.post("/webhook", async (req, res) => {
       from,
       `Registar ${parsed.type === "income" ? "entrada" : "saída"} de ${parsed.amount} Kz (${parsed.description})?\nResponde: Sim ou Não`
     );
-  } catch {
+  } catch (err){
+    console.error(err);
     await reply(from, "Erro ao processar. Tenta novamente.");
   }
 
