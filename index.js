@@ -52,6 +52,15 @@ async function parseTransaction(text) {
   return JSON.parse(parsed);
 }
 
+if (
+  !parsed.type ||
+  typeof parsed.amount !== "number" ||
+  !parsed.description
+) {
+  await reply(from, "Não percebi. Reescreve a frase.");
+  return res.sendStatus(200);
+}
+
 async function reply(to, body) {
   await twilioClient.messages.create({
     from: "whatsapp:+14155238886", // Twilio sandbox number
