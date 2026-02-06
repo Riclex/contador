@@ -2,7 +2,15 @@
   "name": "whatsapp-finance-mvp",
   "version": "1.0.0",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "mongodb": "^6.3.0",
+    "openai": "^4.28.0",
+    "twilio": "^4.21.0",
+    "body-parser": "^1.20.2"
   }
 }
