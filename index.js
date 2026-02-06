@@ -88,7 +88,7 @@ app.post("/webhook", async (req, res) => {
     }, 0);
 
     await reply(from, `Total de hoje: ${total} Kz`);
-    return res.sendStatus(200);
+    return res.sendStatus(204);
   }
 
   // Awaiting confirmation
@@ -106,7 +106,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     sessions[from] = { state: "IDLE" };
-    return res.sendStatus(200);
+    return res.sendStatus(204);
   }
 
   // New transaction
@@ -119,12 +119,12 @@ app.post("/webhook", async (req, res) => {
       !parsed.description
     ) {
     await reply(from, "Não percebi. Reescreve a frase.");
-    return res.sendStatus(200);
+    return res.sendStatus(204);
     }
 
     parsed.amount = Number(parsed.amount);
     parsed.description = parsed.description.trim();
-    
+
     session.state = "AWAITING_CONFIRMATION";
     session.pending = parsed;
 
@@ -137,7 +137,7 @@ app.post("/webhook", async (req, res) => {
     await reply(from, "Erro ao processar. Tenta novamente.");
   }
 
-  res.sendStatus(200);
+  res.sendStatus(204);
 });
 
 app.get("/health", (_, res) => res.send("ok"));
