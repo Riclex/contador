@@ -32,11 +32,12 @@ async function parseTransaction(text) {
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0,
+    response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
         content:
-          "You are a strict financial message parser. Output ONLY valid JSON. If ambiguous output {\"error\":\"ambiguous\"}."
+          "You are a strict financial message parser. You MUST output a JSON object with exactly these keys: type, amount, description. No other keys are allowed. If any value is missing or ambiguous, output {\"error\":\"ambiguous\"}."
       },
       {
         role: "user",
@@ -45,7 +46,10 @@ async function parseTransaction(text) {
     ]
   });
 
-  return JSON.parse(response.choices[0].message.content);
+  const parsed = response.choices[0].message.content;
+  console.log("LLM RAW:", parsed);
+  
+  return JSON.parse(parsed);
 }
 
 async function reply(to, body) {
@@ -127,16 +131,6 @@ app.post("/webhook", async (req, res) => {
 
   res.sendStatus(200);
 });
-
-app.get("/mongo-check", async (_, res) => {
-  try {
-    await transactions.findOne();
-    res.send("mongo ok");
-  } catch {
-    res.status(500).send("mongo fail");
-  }
-});
-
 
 app.get("/health", (_, res) => res.send("ok"));
 
