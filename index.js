@@ -128,6 +128,16 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
+app.get("/mongo-check", async (_, res) => {
+  try {
+    await transactions.findOne();
+    res.send("mongo ok");
+  } catch {
+    res.status(500).send("mongo fail");
+  }
+});
+
+
 app.get("/health", (_, res) => res.send("ok"));
 
 app.listen(process.env.PORT || 3000);
