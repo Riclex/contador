@@ -51,7 +51,51 @@ async function parseTransaction(text) {
       {
         role: "system",
         content:
-          "You are a strict financial message parser. You MUST output a JSON object with exactly these keys: type, amount, description. No other keys are allowed. If any value is missing or ambiguous, output {\"error\":\"ambiguous\"}. Portuguese language only. Examples:\n\nInput: 'Paguei 500 Kz de almoço'\nOutput: {\"type\":\"expense\",\"amount\":500,\"description\":\"almoço\"}\n\nInput: 'Recebi 2000 Kz do João'\nOutput: {\"type\":\"income\",\"amount\":2000,\"description\":\"do João\"}\n\nInput: 'Comprei pão'\nOutput: {\"error\":\"ambiguous\"}"
+          "You are a strict financial message parser. \
+          Your task is to extract a single financial transaction from a Portuguese sentence. \
+          You MUST output a JSON object with exactly these keys:\
+          type: 'income' or 'expense'\
+          amount: number (integer, no currency symbols)\
+          description: short string taken from the sentence.\
+          Rules (MANDATORY): \
+          1. Verb mapping: \
+          - Any sentence containing verbs like 'gastei', 'paguei', 'comprei', 'gasto', 'pagamento' → type = 'expense'.\
+          - Any sentence containing verbs like 'recebi', 'vendi', 'ganhei', 'paiei', 'biolo', 'fezada'→ type = 'income' \
+          2. Amount: \
+          - If a numeric amount is present, extract it. \
+          - Ignore currency case (Kz, kz, KZ, AKZ, akz, paus are the same)\
+          3. Description: \
+          - Use the words after 'de', 'do', 'da' when present.\
+          - If description is generic (e.g. 'saldo'), it is STILL VALID.\
+          4. Ambiguity: \
+          - ONLY output {'error':'ambiguous'} if: \
+          - No numeric amount exists \
+          - OR no verb exists \
+          - OR transaction type cannot be determined. \
+          5. Output: \
+          - Output ONLY valid JSON. \
+          - No explanatations. \
+          - No extra keys. \
+          Examples: \
+          Input: 'Gastei 1500 Kz de saldo'\
+          Output: {'type':'expense','amount':1500,'description':'saldo'}\
+          Input: 'Comprei 1000 kz de fuba'\
+          Output: {'type':'expense','amount':1000,'description':'fuba'}\
+          Input: 'Recebi 2000 Kz do João'\
+          Output: {'type':'income','amount':2000,'description':'do João'}\
+          Input: 'Comprei pão'\
+          Output: {'error':'ambiguous'}\
+          Input: 'Pus saldo'\
+          Output: {'error':'ambiguous'}\
+          Input: 'Emprestei 500 kz'\
+          Output: {'type':'expense','amount':500,'description':'divida'}\
+          Input: 'Fezade de 3000 kz'\
+          Output: {'type':'income','amount':3000,'description':'fezada'}\
+          Input: 'Biolo 2500 kz'\
+          Output: {'type':'income','amount':2500,'description':'biolo'}\
+          Input: 'Paiei 3000 paus num wi'\
+          Output: {'type':'income','amount':3000,'description':'wi'}\
+          "
       },
       {
         role: "user",
@@ -99,7 +143,7 @@ app.post("/webhook", async (req, res) => {
 
     let total = 0;
 
-    for (const t of docs){
+    for (const t of docs) {
       const amount = Number(t.amount);
 
       if (!Number.isFinite(amount)) continue;
@@ -140,31 +184,37 @@ app.post("/webhook", async (req, res) => {
     const parsed = await parseTransaction(text);
 
     if (
-      !parsed.type ||
-      typeof parsed.amount !== "number" ||
-      !parsed.description
+      !parsed ||
+      parsed.error ||
+      !["income", "expense"].includes(parsed.type) ||
+      !Number.isFinite(parsed.amount) ||
+      typeof parsed.description !== "string" ||
+      parsed.description.trim().length === 0
     ) {
-    await reply(from, "Não percebi. Reescreve a frase.");
-    return res.sendStatus(204);
+      await reply(from, "Não percebi. Reescreve a frase.");
+      return res.sendStatus(204);
     }
 
     parsed.amount = Number(parsed.amount);
     parsed.description = parsed.description.trim();
 
-    session.state = "AWAITING_CONFIRMATION";
-    session.pending = parsed;
+    sessions[from] = {
+      state: "AWAITING_CONFIRMATION",
+      pending: parsed
+    };
 
     await reply(
       from,
       `Registar ${parsed.type === "income" ? "entrada" : "saída"} de ${parsed.amount} Kz (${parsed.description})?\nResponde: Sim ou Não`
     );
+
+    return res.sendStatus(204);
   } catch (err) {
     console.error(err);
     await reply(from, "Erro ao processar. Tenta novamente.");
     return res.sendStatus(204);
   }
 
-  res.sendStatus(204);
 });
 
 app.get("/health", (_, res) => res.send("ok"));
