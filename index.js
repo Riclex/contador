@@ -7,9 +7,23 @@ import twilio from "twilio";
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
+// --- Environment Validation
+const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"];
+const missing = requiredEnvVars.filter((key) => !process.env[key]);
+if (missing.length > 0) {
+  console.error(`Missing required environment variables: ${missing.join(", ")}`);
+  process.exit(1);
+}
+
 // --- Clients
 const mongo = new MongoClient(process.env.MONGODB_URI);
-await mongo.connect();
+try {
+  await mongo.connect();
+  console.log("Connected to MongoDB");
+} catch (err) {
+  console.error("Failed to connect to MongoDB:", err.message);
+  process.exit(1);
+}
 const db = mongo.db();
 const transactions = db.collection("transactions");
 
@@ -52,9 +66,11 @@ async function parseTransaction(text) {
   return JSON.parse(parsed);
 }
 
+const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER || "whatsapp:+14155238886";
+
 async function reply(to, body) {
   await twilioClient.messages.create({
-    from: "whatsapp:+14155238886", // Twilio sandbox number
+    from: TWILIO_WHATSAPP_NUMBER,
     to,
     body
   });
@@ -81,11 +97,19 @@ app.post("/webhook", async (req, res) => {
       date: { $gte: start }
     }).toArray();
 
-    const total = docs.reduce((sum, t) => {
-      return t.type === "income"
-        ? sum + t.amount
-        : sum - t.amount;
-    }, 0);
+    let total = 0;
+
+    for (const t of docs){
+      const amount = Number(t.amount);
+
+      if (!Number.isFinite(amount)) continue;
+
+      if (t.type === "income") {
+        total += amount;
+      } else if (t.type === "expense") {
+        total -= amount;
+      }
+    }
 
     await reply(from, `Total de hoje: ${total} Kz`);
     return res.sendStatus(204);
@@ -96,7 +120,9 @@ app.post("/webhook", async (req, res) => {
     if (text === "sim") {
       await transactions.insertOne({
         user_phone: from,
-        ...session.pending,
+        type: session.pending.type,
+        amount: Number(session.pending.amount),
+        description: session.pending.description,
         date: new Date()
       });
 
@@ -132,9 +158,10 @@ app.post("/webhook", async (req, res) => {
       from,
       `Registar ${parsed.type === "income" ? "entrada" : "saída"} de ${parsed.amount} Kz (${parsed.description})?\nResponde: Sim ou Não`
     );
-  } catch (err){
+  } catch (err) {
     console.error(err);
     await reply(from, "Erro ao processar. Tenta novamente.");
+    return res.sendStatus(204);
   }
 
   res.sendStatus(204);
