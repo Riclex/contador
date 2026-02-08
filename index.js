@@ -4,6 +4,8 @@ import { MongoClient } from "mongodb";
 import OpenAI from "openai";
 import twilio from "twilio";
 
+const MAX_PROCESSED_MESSAGES = 10000;
+const processedMessages = new Set();
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
@@ -104,10 +106,7 @@ async function parseTransaction(text) {
     ]
   });
 
-  const parsed = response.choices[0].message.content;
-  console.log("LLM RAW:", parsed);
-  
-  return JSON.parse(parsed);
+  return JSON.parse(response.choices[0].message.content);
 }
 
 const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER || "whatsapp:+14155238886";
@@ -123,7 +122,25 @@ async function reply(to, body) {
 // --- Routes
 app.post("/webhook", async (req, res) => {
   const from = req.body.From;
-  const text = normalize(req.body.Body);
+  const text = normalize(req.body.Body) || "";
+  const messageSid = req.body.MessageSid;
+
+  // Retry protection
+  if (!messageSid) {
+    return res.sendStatus (204);
+  }
+
+  if (processedMessages.has(messageSid)) {
+    return res.sendStatus(204);
+  }
+
+  processedMessages.add(messageSid);
+
+  if (processedMessages.size > MAX_PROCESSED_MESSAGES) {
+    const iterator = processedMessages.values();
+    const first = iterator.next().value;
+    processedMessages.delete(first);
+  }
 
   if (!sessions[from]) {
     sessions[from] = { state: "IDLE" };
@@ -162,13 +179,20 @@ app.post("/webhook", async (req, res) => {
   // Awaiting confirmation
   if (session.state === "AWAITING_CONFIRMATION") {
     if (text === "sim") {
-      await transactions.insertOne({
-        user_phone: from,
-        type: session.pending.type,
-        amount: Number(session.pending.amount),
-        description: session.pending.description,
-        date: new Date()
-      });
+      try {
+        await transactions.insertOne({
+          message_sid: messageSid,
+          user_phone: from,
+          type: session.pending.type,
+          amount: Number(session.pending.amount),
+          description: session.pending.description,
+          date: new Date()
+        });
+      } catch (e) {
+        if (e.code !== 11000) throw e;
+        // Duplicate key error, likely due to retry. Ignore
+      }
+
 
       await reply(from, "Registado.");
     } else {
