@@ -191,7 +191,7 @@ async function parseDebtOpenAI(text) {
           Examples: \
           Input: 'O João me deve 2000kz'\
           Output: {'type':'recebido','creditor':'user','debtor':'João','amount':2000,'description':'O João me deve'}\
-          Input: 'Eu devo 1500 ao Maria'\
+          Input: 'Eu devo 1500 a Maria'\
           Output: {'type':'devido','creditor':'Maria','debtor':'user','amount':1500,'description':'Eu devo 1500'}\
           Input: 'Maria deve-me 3000'\
           Output: {'type':'recebido','creditor':'user','debtor':'Maria','amount':3000,'description':'Maria deve-me'}\
@@ -391,8 +391,8 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(204);
   }
 
-  // Command: /quedevot - Who user owes
-  if (text === "/quedevot") {
+  // Command: /quemdevo - Who user owes
+  if (text === "/quemdevo") {
     const docs = await debts.find({
       user_phone: from,
       type: "devido",
@@ -412,8 +412,8 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(204);
   }
 
-  // Command: /dividas - All debts
-  if (text === "/dividas") {
+  // Command: /kilapi - All debts
+  if (text === "/kilapi") {
     const docs = await debts.find({
       user_phone: from,
       settled: { $ne: true }
@@ -439,19 +439,20 @@ app.post("/webhook", async (req, res) => {
   // Command: /pago - Mark debt as paid
   const pagoMatch = text.match(/^\/pago\s+(.+)/i);
   if (pagoMatch) {
-    const debtorName = pagoMatch[1].trim();
+    const name = pagoMatch[1].trim();
+    // Escape special regex characters to prevent ReDoS attacks
+    const sanitizedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const doc = await debts.findOne({
       user_phone: from,
-      type: "devido",
       settled: { $ne: true },
       $or: [
-        { creditor: { $regex: new RegExp(debtorName, "i") } },
-        { debtor: { $regex: new RegExp(debtorName, "i") } }
+        { creditor: { $regex: new RegExp(sanitizedName, "i") } },
+        { debtor: { $regex: new RegExp(sanitizedName, "i") } }
       ]
     });
 
     if (!doc) {
-      await reply(from, "Não encontrei esta dívida.");
+      await reply(from, "Não encontrei esta dívida. Use /dividas para ver as dívidas ativas.");
       return res.sendStatus(204);
     }
 
@@ -459,7 +460,12 @@ app.post("/webhook", async (req, res) => {
       { _id: doc._id },
       { $set: { settled: true, settled_date: new Date() } }
     );
-    await reply(from, `Dívida a ${doc.creditor} marcada como paga.`);
+
+    if (doc.type === "recebido") {
+      await reply(from, `Dívida de ${doc.debtor} (que te deve ${doc.amount} Kz) marcada como paga.`);
+    } else {
+      await reply(from, `Dívida a ${doc.creditor} (que tu deves ${doc.amount} Kz) marcada como paga.`);
+    }
     return res.sendStatus(204);
   }
 
@@ -597,10 +603,13 @@ app.post("/webhook", async (req, res) => {
         }
       };
 
-      const debtTypeText = parsedDebt.type === "recebido" ? "O" : "Tu deves a";
+      const whoOwes = parsedDebt.type === "recebido" ? parsedDebt.debtor : parsedDebt.creditor;
+      const debtText = parsedDebt.type === "recebido"
+        ? `${whoOwes} te deve ${parsedDebt.amount}`
+        : `tu deves ${parsedDebt.amount} a ${whoOwes}`;
       await reply(
         from,
-        `Registar que ${debtTypeText} ${parsedDebt.creditor} ${parsedDebt.type === "recebido" ? `deve-te ${parsedDebt.amount}` : `deves ${parsedDebt.amount} a ${parsedDebt.creditor}`} Kz?\nResponde: Sim ou Não`
+        `Registar que ${debtText} Kz?\nResponde: Sim ou Não`
       );
       return res.sendStatus(204);
     }
