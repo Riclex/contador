@@ -4,6 +4,121 @@ import { MongoClient } from "mongodb";
 import OpenAI from "openai";
 import twilio from "twilio";
 
+// --- Regex-based transaction parser constants
+const INCOME_VERBS = ['vendi', 'recebi', 'ganhei', 'paiei', 'biolo', 'fezada'];
+const EXPENSE_VERBS = ['comprei', 'gastei', 'paguei', 'gasto', 'pagamento', 'emprestei'];
+
+function parseTransactionRegex(text) {
+  const normalized = text.toLowerCase().trim();
+
+  // Detect type by verbs
+  let type = null;
+
+  for (const verb of INCOME_VERBS) {
+    if (normalized.includes(verb)) {
+      type = 'income';
+      break;
+    }
+  }
+  if (!type) {
+    for (const verb of EXPENSE_VERBS) {
+      if (normalized.includes(verb)) {
+        type = 'expense';
+        break;
+      }
+    }
+  }
+
+  if (!type) return { error: 'ambiguous' };
+
+  // Extract amount (number, optionally followed by Kz or paus)
+  const amountMatch = normalized.match(/(\d+)\s*(kz|paus)?/);
+  const amount = amountMatch ? parseInt(amountMatch[1]) : null;
+
+  if (!amount) return { error: 'ambiguous' };
+
+  // Extract description (text after de/do/da)
+  const descMatch = normalized.match(/(?:de|do|da)\s+(.+?)(?:\b|$)/);
+  const description = descMatch ? descMatch[1].trim() : '';
+
+  return { type, amount, description };
+}
+
+// --- Regex-based debt parser constants
+const DEBT_VERBS_RECEBIDO = ['me deve', 'me deve', 'deve-me'];
+const DEBT_VERBS_DEVIDO = ['eu devo', 'devo', 'emprestei a'];
+
+function parseDebtRegex(text) {
+  const normalized = text.toLowerCase().trim();
+
+  // Pattern 1: "O João me deve 2000kz" or "João me deve 2000kz" - Someone owes user
+  const pattern1 = /(?:o\s+)?([\w\u00C0-\u00FF]+)\s+me\s+deve\s+(\d+)\s*(kz)?/iu;
+  const match1 = normalized.match(pattern1);
+  if (match1) {
+    return {
+      type: "recebido",
+      creditor: "user",
+      debtor: match1[1],
+      amount: parseInt(match1[2]),
+      description: `O ${match1[1]} me deve`
+    };
+  }
+
+  // Pattern 2: "Me deve 2000 ao João" - Someone owes user (name after 'ao' or 'a')
+  const pattern2 = /me\s+deve\s+(\d+)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
+  const match2 = normalized.match(pattern2);
+  if (match2) {
+    return {
+      type: "recebido",
+      creditor: "user",
+      debtor: match2[3],
+      amount: parseInt(match2[1]),
+      description: `Me deve ${match2[1]}`
+    };
+  }
+
+  // Pattern 3: "Eu devo 1500 ao Maria" - User owes someone (name after 'ao' or 'a')
+  const pattern3 = /eu\s+devo\s+(\d+)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
+  const match3 = normalized.match(pattern3);
+  if (match3) {
+    return {
+      type: "devido",
+      creditor: match3[3],
+      debtor: "user",
+      amount: parseInt(match3[1]),
+      description: `Eu devo ${match3[1]}`
+    };
+  }
+
+  // Pattern 4: "Devo 1500 a Maria" - User owes someone (name after 'ao' or 'a')
+  const pattern4 = /devo\s+(\d+)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
+  const match4 = normalized.match(pattern4);
+  if (match4) {
+    return {
+      type: "devido",
+      creditor: match4[3],
+      debtor: "user",
+      amount: parseInt(match4[1]),
+      description: `Devo ${match4[1]}`
+    };
+  }
+
+  // Pattern 5: "Emprestei 500 ao João" - User lent money (expects return)
+  const pattern5 = /emprestei\s+(\d+)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
+  const match5 = normalized.match(pattern5);
+  if (match5) {
+    return {
+      type: "recebido",
+      creditor: "user",
+      debtor: match5[3],
+      amount: parseInt(match5[1]),
+      description: `Emprestei ${match5[1]}`
+    };
+  }
+
+  return { error: 'ambiguous' };
+}
+
 const MAX_PROCESSED_MESSAGES = 10000;
 const processedMessages = new Set();
 const app = express();
@@ -28,6 +143,12 @@ try {
 }
 const db = mongo.db();
 const transactions = db.collection("transactions");
+const debts = db.collection("debts");
+
+// Create indexes on debts collection
+await debts.createIndex({ user_phone: 1, settled: 1 });
+await debts.createIndex({ user_phone: 1, creditor: 1, debtor: 1 });
+await debts.createIndex({ message_sid: 1 });
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -36,7 +157,73 @@ const twilioClient = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
+async function parseDebtOpenAI(text) {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a strict debt tracking message parser. \
+          Your task is to extract a single debt transaction from a Portuguese sentence. \
+          You MUST output a JSON object with exactly these keys:\
+          type: 'recebido' or 'devido'\
+          creditor: string (who is owed money)\
+          debtor: string (who owes money)\
+          amount: number (integer, no currency symbols)\
+          description: short string from the sentence.\
+          Rules (MANDATORY): \
+          1. Type mapping: \
+          - 'recebido' = someone owes the user (e.g., 'João me deve', 'O João deve')\
+          - 'devido' = user owes someone (e.g., 'eu devo', 'devo')\
+          2. Amount: \
+          - Extract numeric amount, ignore currency (Kz, kz, KZ, paus)\
+          3. Description: \
+          - Use relevant words from the sentence\
+          4. Ambiguity: \
+          - ONLY output {'error':'ambiguous'} if no debt relationship can be determined. \
+          5. Output: \
+          - Output ONLY valid JSON. \
+          - No explanations. \
+          - No extra keys. \
+          Examples: \
+          Input: 'O João me deve 2000kz'\
+          Output: {'type':'recebido','creditor':'user','debtor':'João','amount':2000,'description':'O João me deve'}\
+          Input: 'Eu devo 1500 ao Maria'\
+          Output: {'type':'devido','creditor':'Maria','debtor':'user','amount':1500,'description':'Eu devo 1500'}\
+          Input: 'Maria deve-me 3000'\
+          Output: {'type':'recebido','creditor':'user','debtor':'Maria','amount':3000,'description':'Maria deve-me'}\
+          Input: 'Emprestei 500 ao João'\
+          Output: {'type':'recebido','creditor':'user','debtor':'João','amount':500,'description':'Emprestei 500'}\
+          Input: 'Devo 200 a Ana'\
+          Output: {'type':'devido','creditor':'Ana','debtor':'user','amount':200,'description':'Devo 200'}\
+          "
+      },
+      {
+        role: "user",
+        content: `Extrai uma dívida desta frase:\n"${text}"`
+      }
+    ]
+  });
+
+  return JSON.parse(response.choices[0].message.content);
+}
+
+async function parseDebt(text) {
+  // Try regex first (fast, free)
+  const regexResult = parseDebtRegex(text);
+  if (regexResult.error !== 'ambiguous') {
+    return regexResult;
+  }
+
+  // Fallback to OpenAI for ambiguous cases
+  return parseDebtOpenAI(text);
+}
+
 // --- In-memory sessions
+// State types: IDLE, AWAITING_CONFIRMATION, AWAITING_DEBT_CONFIRMATION, AWAITING_DEBTOR_NAME
 const sessions = {};
 
 // --- Helpers
@@ -45,6 +232,13 @@ function normalize(text) {
 }
 
 async function parseTransaction(text) {
+  // Try regex first (fast, free)
+  const regexResult = parseTransactionRegex(text);
+  if (regexResult.error !== 'ambiguous') {
+    return regexResult;
+  }
+
+  // Fallback to OpenAI for ambiguous cases
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0,
@@ -127,7 +321,7 @@ app.post("/webhook", async (req, res) => {
 
   // Retry protection
   if (!messageSid) {
-    return res.sendStatus (204);
+    return res.sendStatus(204);
   }
 
   if (processedMessages.has(messageSid)) {
@@ -176,7 +370,100 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(204);
   }
 
-  // Awaiting confirmation
+  // Command: /quemedeve - Who owes user
+  if (text === "/quemedeve") {
+    const docs = await debts.find({
+      user_phone: from,
+      type: "recebido",
+      settled: { $ne: true }
+    }).toArray();
+
+    if (docs.length === 0) {
+      await reply(from, "Ninguém te deve dinheiro.");
+      return res.sendStatus(204);
+    }
+
+    let message = "Quem te deve dinheiro:\n";
+    for (const d of docs) {
+      message += `- ${d.debtor}: ${d.amount} Kz\n`;
+    }
+    await reply(from, message);
+    return res.sendStatus(204);
+  }
+
+  // Command: /quedevot - Who user owes
+  if (text === "/quedevot") {
+    const docs = await debts.find({
+      user_phone: from,
+      type: "devido",
+      settled: { $ne: true }
+    }).toArray();
+
+    if (docs.length === 0) {
+      await reply(from, "Tu não deves dinheiro a ninguém.");
+      return res.sendStatus(204);
+    }
+
+    let message = "Tu deves dinheiro a:\n";
+    for (const d of docs) {
+      message += `- ${d.creditor}: ${d.amount} Kz\n`;
+    }
+    await reply(from, message);
+    return res.sendStatus(204);
+  }
+
+  // Command: /dividas - All debts
+  if (text === "/dividas") {
+    const docs = await debts.find({
+      user_phone: from,
+      settled: { $ne: true }
+    }).toArray();
+
+    if (docs.length === 0) {
+      await reply(from, "Não tens dívidas ativas.");
+      return res.sendStatus(204);
+    }
+
+    let message = "Dívidas ativas:\n";
+    for (const d of docs) {
+      if (d.type === "recebido") {
+        message += `- ${d.debtor} te deve: ${d.amount} Kz\n`;
+      } else {
+        message += `- Tu deves a ${d.creditor}: ${d.amount} Kz\n`;
+      }
+    }
+    await reply(from, message);
+    return res.sendStatus(204);
+  }
+
+  // Command: /pago - Mark debt as paid
+  const pagoMatch = text.match(/^\/pago\s+(.+)/i);
+  if (pagoMatch) {
+    const debtorName = pagoMatch[1].trim();
+    const doc = await debts.findOne({
+      user_phone: from,
+      type: "devido",
+      settled: { $ne: true },
+      $or: [
+        { creditor: { $regex: new RegExp(debtorName, "i") } },
+        { debtor: { $regex: new RegExp(debtorName, "i") } }
+      ]
+    });
+
+    if (!doc) {
+      await reply(from, "Não encontrei esta dívida.");
+      return res.sendStatus(204);
+    }
+
+    await debts.updateOne(
+      { _id: doc._id },
+      { $set: { settled: true, settled_date: new Date() } }
+    );
+    await reply(from, `Dívida a ${doc.creditor} marcada como paga.`);
+    return res.sendStatus(204);
+  }
+
+  // Awaiting confirmation (regular transaction)
   if (session.state === "AWAITING_CONFIRMATION") {
     if (text === "sim") {
       try {
@@ -190,17 +477,136 @@ app.post("/webhook", async (req, res) => {
         });
       } catch (e) {
         if (e.code !== 11000) throw e;
-        // Duplicate key error, likely due to retry. Ignore
       }
-
-
       await reply(from, "Registado.");
     } else {
       await reply(from, "Cancelado.");
     }
-
     sessions[from] = { state: "IDLE" };
     return res.sendStatus(204);
+  }
+
+  // Awaiting debt confirmation
+  if (session.state === "AWAITING_DEBT_CONFIRMATION") {
+    if (text === "sim") {
+      try {
+        await debts.insertOne({
+          message_sid: messageSid,
+          user_phone: from,
+          type: session.pendingDebt.type,
+          creditor: session.pendingDebt.creditor,
+          debtor: session.pendingDebt.debtor,
+          amount: session.pendingDebt.amount,
+          description: session.pendingDebt.description,
+          date: new Date(),
+          settled: false,
+          settled_date: null
+        });
+        await reply(from, "Dívida registada.");
+      } catch (e) {
+        if (e.code !== 11000) throw e;
+        await reply(from, "Dívida registada.");
+      }
+    } else {
+      await reply(from, "Cancelado.");
+    }
+    sessions[from] = { state: "IDLE" };
+    return res.sendStatus(204);
+  }
+
+  // Handle Awaiting Debtor Name state (for regex parses where name was 'user')
+  if (session.state === "AWAITING_DEBTOR_NAME") {
+    const pendingDebt = session.pendingDebt;
+
+    if (text === "nao" || text === "não") {
+      await reply(from, "Cancelado.");
+      sessions[from] = { state: "IDLE" };
+      return res.sendStatus(204);
+    }
+
+    // Update the name based on debt type
+    if (pendingDebt.type === "recebido" && pendingDebt.debtor === "user") {
+      pendingDebt.debtor = text.trim();
+    } else if (pendingDebt.type === "devido" && pendingDebt.creditor === "user") {
+      pendingDebt.creditor = text.trim();
+    }
+
+    try {
+      await debts.insertOne({
+        message_sid: messageSid,
+        user_phone: from,
+        type: pendingDebt.type,
+        creditor: pendingDebt.creditor,
+        debtor: pendingDebt.debtor,
+        amount: pendingDebt.amount,
+        description: pendingDebt.description,
+        date: new Date(),
+        settled: false,
+        settled_date: null
+      });
+      await reply(from, "Dívida registada.");
+    } catch (e) {
+      if (e.code !== 11000) throw e;
+      await reply(from, "Dívida registada.");
+    }
+    sessions[from] = { state: "IDLE" };
+    return res.sendStatus(204);
+  }
+
+  // Check for debt pattern first (before transaction parsing)
+  try {
+    const parsedDebt = await parseDebt(text);
+
+    if (
+      parsedDebt &&
+      !parsedDebt.error &&
+      ["recebido", "devido"].includes(parsedDebt.type) &&
+      Number.isFinite(parsedDebt.amount) &&
+      typeof parsedDebt.creditor === "string" &&
+      typeof parsedDebt.debtor === "string"
+    ) {
+      // Check if we need user input to fill in a name
+      if (parsedDebt.creditor === "user" || parsedDebt.debtor === "user") {
+        sessions[from] = {
+          state: "AWAITING_DEBTOR_NAME",
+          pendingDebt: {
+            type: parsedDebt.type,
+            creditor: parsedDebt.creditor,
+            debtor: parsedDebt.debtor,
+            amount: parsedDebt.amount,
+            description: parsedDebt.description
+          }
+        };
+        if (parsedDebt.type === "recebido") {
+          await reply(from, "Quem te deve? Escreve o nome.");
+        } else {
+          await reply(from, "Tu deves a quem? Escreve o nome.");
+        }
+        return res.sendStatus(204);
+      }
+
+      // Full info available, ask for confirmation
+      sessions[from] = {
+        state: "AWAITING_DEBT_CONFIRMATION",
+        pendingDebt: {
+          type: parsedDebt.type,
+          creditor: parsedDebt.creditor,
+          debtor: parsedDebt.debtor,
+          amount: parsedDebt.amount,
+          description: parsedDebt.description
+        }
+      };
+
+      const debtTypeText = parsedDebt.type === "recebido" ? "O" : "Tu deves a";
+      await reply(
+        from,
+        `Registar que ${debtTypeText} ${parsedDebt.creditor} ${parsedDebt.type === "recebido" ? `deve-te ${parsedDebt.amount}` : `deves ${parsedDebt.amount} a ${parsedDebt.creditor}`} Kz?\nResponde: Sim ou Não`
+      );
+      return res.sendStatus(204);
+    }
+  } catch (err) {
+    console.error("Debt parsing error:", err);
+    // Fall through to transaction parsing
   }
 
   // New transaction
