@@ -18,17 +18,21 @@ This is a single-file Express.js application with a simple architecture:
   - Expense: comprei, gastei, paguei, gasto, pagamento, emprestei, transferi, enviei
   - Debt: "X me deve", "eu devo", "devo", "emprestei a"
 - **Messaging**: Twilio WhatsApp API for user communication
-- **Session Management**: In-memory JavaScript object (`sessions`) - data is lost on restart
+- **Session Management**: MongoDB-backed with in-memory cache - sessions persist across restarts with 30min TTL
 - **Deduplication**: `processedMessages` Set tracks `MessageSid` values with a 10,000 message FIFO limit to prevent memory leaks
 - **Response Cache**: LRU cache (1000 entries, 24h TTL) for parsed results to avoid reprocessing identical messages
+- **Rate Limiting**: Per-user daily limit (50 messages/day) to prevent abuse
 - **Admin Commands**: `/stats` command for authorized phone numbers shows cache hit rate and performance metrics
 
 ### Security Features
 
 - **ReDoS Protection**: Safe regex patterns prevent catastrophic backtracking attacks
 - **Input Validation**: Amount values validated for range and type before processing
+- **Webhook Signature Verification**: SHA256 signature validation via `x-twilio-signature` header
+- **Input Sanitization**: Control characters stripped from user messages
 - **OpenAI Error Handling**: API failures handled gracefully with user-friendly error messages
 - **Graceful Shutdown**: MongoDB connection properly closed on SIGTERM/SIGINT
+- **Rate Limiting**: Per-user daily limit (50 messages) prevents API abuse
 
 ### Key Components
 
@@ -60,6 +64,13 @@ This is a single-file Express.js application with a simple architecture:
 6. **Database Indexes**:
    - `transactions`: `{ user_phone: 1, date: -1 }` for date range queries, `{ message_sid: 1 }` unique
    - `debts`: `{ user_phone: 1, settled: 1 }`, `{ user_phone: 1, creditor: 1, debtor: 1 }`, `{ message_sid: 1 }` unique
+
+### Sprint 9 - Completed (Security & Stability)
+- **Webhook Signature Verification**: SHA256 validation of Twilio signatures
+- **Input Sanitization**: Control character stripping before processing
+- **Rate Limiting**: 50 messages/user/day with automatic cleanup
+- **MongoDB Connection Retry**: Exponential backoff with 10 retries
+- **Session Persistence**: MongoDB-backed sessions with 30min TTL
 
 ## Environment Variables
 
