@@ -9,6 +9,9 @@ import twilio from "twilio";
 const INCOME_VERBS = ['vendi', 'recebi', 'ganhei', 'paiei', 'biolo', 'fezada'];
 const EXPENSE_VERBS = ['comprei', 'gastei', 'paguei', 'gasto', 'pagamento', 'emprestei', 'transferi', 'enviei'];
 
+// Safe regex for amount extraction (no catastrophic backtracking)
+const AMOUNT_REGEX = /(\d[\d\s]*?)\s*(?:kz|paus)?$/i;
+
 function parseTransactionRegex(text) {
   const normalized = text.toLowerCase().trim();
 
@@ -39,10 +42,11 @@ function parseTransactionRegex(text) {
   if (!type) return { error: 'ambiguous' };
 
   // Extract amount (number, optionally followed by Kz or paus)
-  const amountMatch = normalized.match(/(\d[\d\s]*)\s*(kz|paus)?/);
-  const amount = amountMatch ? parseInt(amountMatch[1].replace(/\s/g, '')) : null;
+  // Uses safe regex to prevent ReDoS attacks
+  const amountMatch = normalized.match(/(\d[\d\s]*?)\s*(?:kz|paus)?$/i);
+  const amount = amountMatch ? parseInt(amountMatch[1].replace(/\s/g, ''), 10) : null;
 
-  if (!amount) return { error: 'ambiguous' };
+  if (!amount || isNaN(amount) || amount <= 0) return { error: 'ambiguous' };
 
   // Extract description - try multiple patterns
   let description = '';
@@ -145,11 +149,13 @@ const responseCache = new Map();
 let cacheHits = 0;
 let cacheMisses = 0;
 
-// Admin phone numbers for /stats command
-const ADMIN_NUMBERS = [
-  "whatsapp:+244912756717",
-  "whatsapp:+351936123127"
-];
+// Admin phone numbers for /stats command - loaded from env with fallback
+const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS
+  ? process.env.ADMIN_NUMBERS.split(',').map(s => s.trim())
+  : [
+      "whatsapp:+244912756717",
+      "whatsapp:+351936123127"
+    ];
 
 function isAdmin(phone) {
   return ADMIN_NUMBERS.includes(phone);
@@ -223,7 +229,11 @@ const debts = db.collection("debts");
 // Create indexes on debts collection
 await debts.createIndex({ user_phone: 1, settled: 1 });
 await debts.createIndex({ user_phone: 1, creditor: 1, debtor: 1 });
-await debts.createIndex({ message_sid: 1 });
+await debts.createIndex({ message_sid: 1 }, { unique: true });
+
+// Create indexes on transactions collection
+await transactions.createIndex({ user_phone: 1, date: -1 });
+await transactions.createIndex({ message_sid: 1 }, { unique: true });
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -233,7 +243,8 @@ const twilioClient = twilio(
 );
 
 async function parseDebtOpenAI(text) {
-  const response = await openai.chat.completions.create({
+  try {
+    const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0,
     response_format: { type: "json_object" },
@@ -283,14 +294,18 @@ async function parseDebtOpenAI(text) {
     ]
   });
 
-  return JSON.parse(response.choices[0].message.content);
+    return JSON.parse(response.choices[0].message.content);
+  } catch (error) {
+    console.error('OpenAI debt parsing error:', error.message);
+    return { error: 'service_unavailable', message: 'Failed to parse debt' };
+  }
 }
 
 async function parseDebt(text) {
   // Check cache first
   const cached = getCachedResponse(text, 'debt');
   if (cached) {
-    console.log('Cache hit for debt:', text);
+    console.log('Cache hit for debt');
     return cached;
   }
 
@@ -302,7 +317,7 @@ async function parseDebt(text) {
   }
 
   // Fallback to OpenAI for ambiguous cases
-  console.log('Cache miss - calling OpenAI for debt:', text);
+  console.log('Cache miss - calling OpenAI for debt');
   const result = await parseDebtOpenAI(text);
   setCachedResponse(text, 'debt', result);
   return result;
@@ -321,7 +336,7 @@ async function parseTransaction(text) {
   // Check cache first
   const cached = getCachedResponse(text, 'transaction');
   if (cached) {
-    console.log('Cache hit for transaction:', text);
+    console.log('Cache hit for transaction');
     return cached;
   }
 
@@ -333,71 +348,76 @@ async function parseTransaction(text) {
   }
 
   // Fallback to OpenAI for ambiguous cases
-  console.log('Cache miss - calling OpenAI for transaction:', text);
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are a strict financial message parser. \
-          Your task is to extract a single financial transaction from a Portuguese sentence. \
-          You MUST output a JSON object with exactly these keys:\
-          type: 'income' or 'expense'\
-          amount: number (integer, no currency symbols)\
-          description: short string taken from the sentence.\
-          Rules (MANDATORY): \
-          1. Verb mapping: \
-          - Any sentence containing verbs like 'gastei', 'paguei', 'comprei', 'gasto', 'pagamento' → type = 'expense'.\
-          - Any sentence containing verbs like 'recebi', 'vendi', 'ganhei', 'paiei', 'biolo', 'fezada'→ type = 'income' \
-          2. Amount: \
-          - If a numeric amount is present, extract it. \
-          - Ignore currency case (Kz, kz, KZ, AKZ, akz, paus are the same)\
-          3. Description: \
-          - Use the words after 'de', 'do', 'da' when present.\
-          - If description is generic (e.g. 'saldo'), it is STILL VALID.\
-          4. Ambiguity: \
-          - ONLY output {'error':'ambiguous'} if: \
-          - No numeric amount exists \
-          - OR no verb exists \
-          - OR transaction type cannot be determined. \
-          5. Output: \
-          - Output ONLY valid JSON. \
-          - No explanatations. \
-          - No extra keys. \
-          Examples: \
-          Input: 'Gastei 1500 Kz de saldo'\
-          Output: {'type':'expense','amount':1500,'description':'saldo'}\
-          Input: 'Comprei 1000 kz de fuba'\
-          Output: {'type':'expense','amount':1000,'description':'fuba'}\
-          Input: 'Recebi 2000 Kz do João'\
-          Output: {'type':'income','amount':2000,'description':'do João'}\
-          Input: 'Comprei pão'\
-          Output: {'error':'ambiguous'}\
-          Input: 'Pus saldo'\
-          Output: {'error':'ambiguous'}\
-          Input: 'Emprestei 500 kz'\
-          Output: {'type':'expense','amount':500,'description':'divida'}\
-          Input: 'Fezade de 3000 kz'\
-          Output: {'type':'income','amount':3000,'description':'fezada'}\
-          Input: 'Biolo 2500 kz'\
-          Output: {'type':'income','amount':2500,'description':'biolo'}\
-          Input: 'Paiei 3000 paus num wi'\
-          Output: {'type':'income','amount':3000,'description':'wi'}\
-          "
-      },
-      {
-        role: "user",
-        content: `Extrai uma transação financeira desta frase:\n"${text}"`
-      }
-    ]
-  });
+  console.log('Cache miss - calling OpenAI for transaction');
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a strict financial message parser. \
+            Your task is to extract a single financial transaction from a Portuguese sentence. \
+            You MUST output a JSON object with exactly these keys:\
+            type: 'income' or 'expense'\
+            amount: number (integer, no currency symbols)\
+            description: short string taken from the sentence.\
+            Rules (MANDATORY): \
+            1. Verb mapping: \
+            - Any sentence containing verbs like 'gastei', 'paguei', 'comprei', 'gasto', 'pagamento' → type = 'expense'.\
+            - Any sentence containing verbs like 'recebi', 'vendi', 'ganhei', 'paiei', 'biolo', 'fezada'→ type = 'income' \
+            2. Amount: \
+            - If a numeric amount is present, extract it. \
+            - Ignore currency case (Kz, kz, KZ, AKZ, akz, paus are the same)\
+            3. Description: \
+            - Use the words after 'de', 'do', 'da' when present.\
+            - If description is generic (e.g. 'saldo'), it is STILL VALID.\
+            4. Ambiguity: \
+            - ONLY output {'error':'ambiguous'} if: \
+            - No numeric amount exists \
+            - OR no verb exists \
+            - OR transaction type cannot be determined. \
+            5. Output: \
+            - Output ONLY valid JSON. \
+            - No explanatations. \
+            - No extra keys. \
+            Examples: \
+            Input: 'Gastei 1500 Kz de saldo'\
+            Output: {'type':'expense','amount':1500,'description':'saldo'}\
+            Input: 'Comprei 1000 kz de fuba'\
+            Output: {'type':'expense','amount':1000,'description':'fuba'}\
+            Input: 'Recebi 2000 Kz do João'\
+            Output: {'type':'income','amount':2000,'description':'do João'}\
+            Input: 'Comprei pão'\
+            Output: {'error':'ambiguous'}\
+            Input: 'Pus saldo'\
+            Output: {'error':'ambiguous'}\
+            Input: 'Emprestei 500 kz'\
+            Output: {'type':'expense','amount':500,'description':'divida'}\
+            Input: 'Fezade de 3000 kz'\
+            Output: {'type':'income','amount':3000,'description':'fezada'}\
+            Input: 'Biolo 2500 kz'\
+            Output: {'type':'income','amount':2500,'description':'biolo'}\
+            Input: 'Paiei 3000 paus num wi'\
+            Output: {'type':'income','amount':3000,'description':'wi'}\
+            "
+        },
+        {
+          role: "user",
+          content: `Extrai uma transação financeira desta frase:\n"${text}"`
+        }
+      ]
+    });
 
-  const result = JSON.parse(response.choices[0].message.content);
-  setCachedResponse(text, 'transaction', result);
-  return result;
+    const result = JSON.parse(response.choices[0].message.content);
+    setCachedResponse(text, 'transaction', result);
+    return result;
+  } catch (error) {
+    console.error('OpenAI API error in parseTransaction:', error.message);
+    return { error: 'service_unavailable', message: 'Failed to parse transaction' };
+  }
 }
 
 const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER || "whatsapp:+14155238886";
@@ -763,3 +783,25 @@ app.post("/webhook", async (req, res) => {
 app.get("/health", (_, res) => res.send("ok"));
 
 app.listen(process.env.PORT || 3000);
+
+// --- Graceful shutdown
+let serverClosing = false;
+
+async function gracefulShutdown() {
+  if (serverClosing) return;
+  serverClosing = true;
+  console.log('Shutting down gracefully...');
+
+  try {
+    // Close MongoDB connection
+    await mongo.close();
+    console.log('MongoDB connection closed');
+  } catch (err) {
+    console.error('Error closing MongoDB:', err.message);
+  }
+
+  process.exit(0);
+}
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
