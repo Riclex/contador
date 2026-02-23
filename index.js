@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import bodyParser from "body-parser";
 import { MongoClient } from "mongodb";
+import crypto from "crypto";
 import OpenAI from "openai";
 import twilio from "twilio";
 
@@ -11,6 +12,65 @@ const EXPENSE_VERBS = ['comprei', 'gastei', 'paguei', 'gasto', 'pagamento', 'emp
 
 // Safe regex for amount extraction (no catastrophic backtracking)
 const AMOUNT_REGEX = /(\d[\d\s]*?)\s*(?:kz|paus)?$/i;
+
+// --- Webhook Signature Verification
+function verifyWebhookSignature(signature, url, body) {
+  if (!signature || !process.env.TWILIO_AUTH_TOKEN) {
+    return false;
+  }
+
+  // Sort body parameters alphabetically
+  const sortedParams = Object.keys(body)
+    .sort()
+    .map(key => `${key}${body[key]}`)
+    .join('');
+
+  const urlAndParams = url + sortedParams;
+  const hash = crypto
+    .createHmac('sha256', process.env.TWILIO_AUTH_TOKEN)
+    .update(urlAndParams)
+    .digest('base64');
+
+  return signature === hash;
+}
+
+// --- Rate Limiting
+const MAX_MESSAGES_PER_USER_PER_DAY = 50;
+const rateLimitStore = new Map();
+
+function checkRateLimit(userPhone) {
+  const today = new Date().toDateString();
+  const key = `${userPhone}:${today}`;
+  const record = rateLimitStore.get(key) || { count: 0, resetTime: new Date(today).setDate(new Date().getDate() + 1) };
+
+  if (record.count >= MAX_MESSAGES_PER_USER_PER_DAY) {
+    return { allowed: false, remaining: 0, resetTime: record.resetTime };
+  }
+
+  record.count++;
+  rateLimitStore.set(key, record);
+
+  return { allowed: true, remaining: MAX_MESSAGES_PER_USER_PER_DAY - record.count, resetTime: record.resetTime };
+}
+
+// Clean up old rate limit entries
+setInterval(() => {
+  const now = new Date();
+  for (const [key, record] of rateLimitStore.entries()) {
+    if (now.getTime() > record.resetTime) {
+      rateLimitStore.delete(key);
+    }
+  }
+}, 60000); // Check every minute
+
+// --- Input Sanitization
+function sanitizeInput(text) {
+  if (typeof text !== 'string') {
+    return '';
+  }
+  // Remove control characters except newline and tab
+  return text.replace(/[\x00-\x09\x0B-\x0C\x0E-\x1F\x7F]/g, '');
+}
 
 function parseTransactionRegex(text) {
   const normalized = text.toLowerCase().trim();
@@ -219,13 +279,41 @@ if (missing.length > 0) {
 
 // --- Clients
 const mongo = new MongoClient(process.env.MONGODB_URI);
-try {
-  await mongo.connect();
-  console.log("Connected to MongoDB");
-} catch (err) {
-  console.error("Failed to connect to MongoDB:", err.message);
+
+// MongoDB connection retry with exponential backoff
+let mongoConnected = false;
+let mongoRetryCount = 0;
+const MAX_MONGO_RETRIES = 10;
+
+async function connectWithRetry() {
+  while (mongoRetryCount < MAX_MONGO_RETRIES) {
+    try {
+      await mongo.connect();
+      mongoConnected = true;
+      mongoRetryCount = 0;
+      console.log("Connected to MongoDB");
+      return;
+    } catch (err) {
+      mongoRetryCount++;
+      const backoff = Math.min(1000 * Math.pow(2, mongoRetryCount - 1), 30000);
+      console.error(`MongoDB connection attempt ${mongoRetryCount}/${MAX_MONGO_RETRIES} failed: ${err.message}`);
+      console.log(`Retrying in ${backoff}ms...`);
+      await new Promise(resolve => setTimeout(resolve, backoff));
+    }
+  }
+  console.error("Failed to connect to MongoDB after max retries");
   process.exit(1);
 }
+
+await connectWithRetry();
+
+// Monitor connection health
+mongo.on('close', () => {
+  mongoConnected = false;
+  console.warn('MongoDB connection closed. Attempting reconnection...');
+  connectWithRetry();
+});
+
 const db = mongo.db();
 const transactions = db.collection("transactions");
 const debts = db.collection("debts");
@@ -343,8 +431,55 @@ async function parseDebt(text) {
   return result;
 }
 
-// --- In-memory sessions
+// --- Session Management (MongoDB-based persistence)
 // State types: IDLE, AWAITING_CONFIRMATION, AWAITING_DEBT_CONFIRMATION, AWAITING_DEBTOR_NAME
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+async function getSession(phone) {
+  if (!mongoConnected) return null;
+
+  const doc = await db.collection('sessions').findOne({ phone });
+  if (!doc) return null;
+
+  // Check if session has expired
+  if (Date.now() - doc.updatedAt > SESSION_TTL_MS) {
+    await db.collection('sessions').deleteOne({ phone });
+    return null;
+  }
+
+  // Update last activity time
+  await db.collection('sessions').updateOne(
+    { phone },
+    { $set: { updatedAt: new Date() } }
+  );
+
+  return doc;
+}
+
+async function setSession(phone, sessionData) {
+  if (!mongoConnected) {
+    // Fallback to in-memory if MongoDB is not connected
+    sessions[phone] = { ...sessionData, updatedAt: Date.now() };
+    return;
+  }
+
+  await db.collection('sessions').updateOne(
+    { phone },
+    { $set: { ...sessionData, phone, updatedAt: new Date() } },
+    { upsert: true }
+  );
+}
+
+async function deleteSession(phone) {
+  if (!mongoConnected) {
+    delete sessions[phone];
+    return;
+  }
+
+  await db.collection('sessions').deleteOne({ phone });
+}
+
+// Keep in-memory fallback for speed
 const sessions = {};
 
 // --- Helpers
@@ -452,9 +587,29 @@ async function reply(to, body) {
 
 // --- Routes
 app.post("/webhook", async (req, res) => {
+  // Webhook Signature Verification (Sprint 9 - Security)
+  const twilioSignature = req.headers['x-twilio-signature'];
+  if (twilioSignature) {
+    const url = `${req.protocol}://${req.get('host')}/webhook`;
+    const isValid = verifyWebhookSignature(twilioSignature, url, req.body);
+    if (!isValid) {
+      console.error('Invalid webhook signature from:', req.ip);
+      return res.status(401).send('Invalid signature');
+    }
+  }
+
   const from = req.body.From;
-  const text = normalize(req.body.Body) || "";
+  const rawText = req.body.Body || "";
+  // Input sanitization
+  const text = normalize(sanitizeInput(rawText));
   const messageSid = req.body.MessageSid;
+
+  // Rate limiting (Sprint 9)
+  const rateLimit = checkRateLimit(from);
+  if (!rateLimit.allowed) {
+    await reply(from, `Limite diário de mensagens atingido. Tente novamente amanhã.`);
+    return res.sendStatus(204);
+  }
 
   // Retry protection
   if (!messageSid) {
@@ -473,11 +628,16 @@ app.post("/webhook", async (req, res) => {
     processedMessages.delete(first);
   }
 
-  if (!sessions[from]) {
-    sessions[from] = { state: "IDLE" };
+  // Load session from MongoDB
+  let session = sessions[from];
+  if (!session) {
+    const mongoSession = await getSession(from);
+    session = mongoSession || { state: "IDLE" };
+    sessions[from] = session;
   }
 
-  const session = sessions[from];
+  // Save session to MongoDB immediately after load
+  await setSession(from, session);
 
   // Command: hoje
   if (text === "hoje") {
@@ -633,6 +793,7 @@ app.post("/webhook", async (req, res) => {
       await reply(from, "Cancelado.");
     }
     sessions[from] = { state: "IDLE" };
+    await setSession(from, sessions[from]);
     return res.sendStatus(204);
   }
 
@@ -661,6 +822,7 @@ app.post("/webhook", async (req, res) => {
       await reply(from, "Cancelado.");
     }
     sessions[from] = { state: "IDLE" };
+    await setSession(from, sessions[from]);
     return res.sendStatus(204);
   }
 
@@ -671,6 +833,7 @@ app.post("/webhook", async (req, res) => {
     if (text === "nao" || text === "não") {
       await reply(from, "Cancelado.");
       sessions[from] = { state: "IDLE" };
+      await setSession(from, sessions[from]);
       return res.sendStatus(204);
     }
 
@@ -700,6 +863,7 @@ app.post("/webhook", async (req, res) => {
       await reply(from, "Dívida registada.");
     }
     sessions[from] = { state: "IDLE" };
+    await setSession(from, sessions[from]);
     return res.sendStatus(204);
   }
 
@@ -727,6 +891,7 @@ app.post("/webhook", async (req, res) => {
             description: parsedDebt.description
           }
         };
+        await setSession(from, sessions[from]);
         if (parsedDebt.type === "recebido") {
           await reply(from, "Quem te deve? Escreve o nome.");
         } else {
@@ -746,6 +911,7 @@ app.post("/webhook", async (req, res) => {
           description: parsedDebt.description
         }
       };
+      await setSession(from, sessions[from]);
 
       const whoOwes = parsedDebt.type === "recebido" ? parsedDebt.debtor : parsedDebt.creditor;
       const debtText = parsedDebt.type === "recebido"
@@ -785,6 +951,7 @@ app.post("/webhook", async (req, res) => {
       state: "AWAITING_CONFIRMATION",
       pending: parsed
     };
+    await setSession(from, sessions[from]);
 
     await reply(
       from,
