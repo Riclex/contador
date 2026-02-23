@@ -229,11 +229,21 @@ const debts = db.collection("debts");
 // Create indexes on debts collection
 await debts.createIndex({ user_phone: 1, settled: 1 });
 await debts.createIndex({ user_phone: 1, creditor: 1, debtor: 1 });
-await debts.createIndex({ message_sid: 1 }, { unique: true });
+try {
+  await debts.createIndex({ message_sid: 1 }, { unique: true });
+} catch (err) {
+  // Index already exists (IndexKeySpecsConflict code: 86)
+  if (err.code !== 86) throw err;
+}
 
 // Create indexes on transactions collection
 await transactions.createIndex({ user_phone: 1, date: -1 });
-await transactions.createIndex({ message_sid: 1 }, { unique: true });
+try {
+  await transactions.createIndex({ message_sid: 1 }, { unique: true });
+} catch (err) {
+  // Index already exists (IndexKeySpecsConflict code: 86)
+  if (err.code !== 86) throw err;
+}
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
