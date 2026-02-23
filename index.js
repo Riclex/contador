@@ -42,9 +42,13 @@ function parseTransactionRegex(text) {
   if (!type) return { error: 'ambiguous' };
 
   // Extract amount (number, optionally followed by Kz or paus)
-  // Uses safe regex to prevent ReDoS attacks
-  const amountMatch = normalized.match(/(\d[\d\s]*?)\s*(?:kz|paus)?$/i);
-  const amount = amountMatch ? parseInt(amountMatch[1].replace(/\s/g, ''), 10) : null;
+  // Pattern: digits with optional spaces, optionally followed by Kz/paus
+  // Use non-greedy match that stops before a word boundary followed by letters
+  const amountMatch = normalized.match(/(\d+(?:[\s]\d+)*)\s*(?:kz|paus)?/i);
+  let amount = null;
+  if (amountMatch) {
+    amount = parseInt(amountMatch[1].replace(/[\s]/g, ''), 10);
+  }
 
   if (!amount || isNaN(amount) || amount <= 0) return { error: 'ambiguous' };
 
