@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import bodyParser from "body-parser";
 import { MongoClient } from "mongodb";
@@ -6,7 +7,7 @@ import twilio from "twilio";
 
 // --- Regex-based transaction parser constants
 const INCOME_VERBS = ['vendi', 'recebi', 'ganhei', 'paiei', 'biolo', 'fezada'];
-const EXPENSE_VERBS = ['comprei', 'gastei', 'paguei', 'gasto', 'pagamento', 'emprestei'];
+const EXPENSE_VERBS = ['comprei', 'gastei', 'paguei', 'gasto', 'pagamento', 'emprestei', 'transferi', 'enviei'];
 
 function parseTransactionRegex(text) {
   const normalized = text.toLowerCase().trim();
@@ -20,6 +21,12 @@ function parseTransactionRegex(text) {
       break;
     }
   }
+
+  // Special case: "enviei para a minha conta" = income (money coming into user's account)
+  if (normalized.includes('enviei') && normalized.includes('minha conta')) {
+    type = 'income';
+  }
+
   if (!type) {
     for (const verb of EXPENSE_VERBS) {
       if (normalized.includes(verb)) {
@@ -32,14 +39,23 @@ function parseTransactionRegex(text) {
   if (!type) return { error: 'ambiguous' };
 
   // Extract amount (number, optionally followed by Kz or paus)
-  const amountMatch = normalized.match(/(\d+)\s*(kz|paus)?/);
-  const amount = amountMatch ? parseInt(amountMatch[1]) : null;
+  const amountMatch = normalized.match(/(\d[\d\s]*)\s*(kz|paus)?/);
+  const amount = amountMatch ? parseInt(amountMatch[1].replace(/\s/g, '')) : null;
 
   if (!amount) return { error: 'ambiguous' };
 
-  // Extract description (text after de/do/da)
-  const descMatch = normalized.match(/(?:de|do|da)\s+(.+?)(?:\b|$)/);
-  const description = descMatch ? descMatch[1].trim() : '';
+  // Extract description - try multiple patterns
+  let description = '';
+
+  // Pattern: "para X" (for transfers: "transferi 200000 para Hugo")
+  const paraMatch = normalized.match(/para\s+([\w\u00C0-\u00FF]+)/iu);
+  if (paraMatch) {
+    description = normalized.includes('minha conta') ? 'transferência para conta' : `transferência para ${paraMatch[1]}`;
+  } else {
+    // Pattern: "de/do/da X" (existing logic)
+    const descMatch = normalized.match(/(?:de|do|da)\s+(.+?)(?:\b|$)/);
+    description = descMatch ? descMatch[1].trim() : '';
+  }
 
   return { type, amount, description };
 }
@@ -121,6 +137,65 @@ function parseDebtRegex(text) {
 
 const MAX_PROCESSED_MESSAGES = 10000;
 const processedMessages = new Set();
+
+// --- Response Cache
+const CACHE_SIZE = 1000;
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const responseCache = new Map();
+let cacheHits = 0;
+let cacheMisses = 0;
+
+// Admin phone numbers for /stats command
+const ADMIN_NUMBERS = [
+  "whatsapp:+244912756717",
+  "whatsapp:+351936123127"
+];
+
+function isAdmin(phone) {
+  return ADMIN_NUMBERS.includes(phone);
+}
+
+function getCacheKey(text, type) {
+  return `${type}:${text.toLowerCase().trim()}`;
+}
+
+function getCachedResponse(text, type) {
+  const key = getCacheKey(text, type);
+  const entry = responseCache.get(key);
+  if (entry && Date.now() - entry.timestamp < CACHE_TTL_MS) {
+    cacheHits++;
+    return entry.data;
+  }
+  // Remove expired entry
+  if (entry) responseCache.delete(key);
+  cacheMisses++;
+  return null;
+}
+
+function setCachedResponse(text, type, data) {
+  const key = getCacheKey(text, type);
+  // LRU eviction if cache is full
+  if (responseCache.size >= CACHE_SIZE) {
+    const firstKey = responseCache.keys().next().value;
+    responseCache.delete(firstKey);
+  }
+  responseCache.set(key, {
+    data,
+    timestamp: Date.now()
+  });
+}
+
+function getCacheStats() {
+  const total = cacheHits + cacheMisses;
+  const hitRate = total > 0 ? ((cacheHits / total) * 100).toFixed(1) : 0;
+  return {
+    size: responseCache.size,
+    hits: cacheHits,
+    misses: cacheMisses,
+    hitRate: `${hitRate}%`
+  };
+}
+
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
@@ -212,14 +287,25 @@ async function parseDebtOpenAI(text) {
 }
 
 async function parseDebt(text) {
+  // Check cache first
+  const cached = getCachedResponse(text, 'debt');
+  if (cached) {
+    console.log('Cache hit for debt:', text);
+    return cached;
+  }
+
   // Try regex first (fast, free)
   const regexResult = parseDebtRegex(text);
   if (regexResult.error !== 'ambiguous') {
+    setCachedResponse(text, 'debt', regexResult);
     return regexResult;
   }
 
   // Fallback to OpenAI for ambiguous cases
-  return parseDebtOpenAI(text);
+  console.log('Cache miss - calling OpenAI for debt:', text);
+  const result = await parseDebtOpenAI(text);
+  setCachedResponse(text, 'debt', result);
+  return result;
 }
 
 // --- In-memory sessions
@@ -232,13 +318,22 @@ function normalize(text) {
 }
 
 async function parseTransaction(text) {
+  // Check cache first
+  const cached = getCachedResponse(text, 'transaction');
+  if (cached) {
+    console.log('Cache hit for transaction:', text);
+    return cached;
+  }
+
   // Try regex first (fast, free)
   const regexResult = parseTransactionRegex(text);
   if (regexResult.error !== 'ambiguous') {
+    setCachedResponse(text, 'transaction', regexResult);
     return regexResult;
   }
 
   // Fallback to OpenAI for ambiguous cases
+  console.log('Cache miss - calling OpenAI for transaction:', text);
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0,
@@ -300,7 +395,9 @@ async function parseTransaction(text) {
     ]
   });
 
-  return JSON.parse(response.choices[0].message.content);
+  const result = JSON.parse(response.choices[0].message.content);
+  setCachedResponse(text, 'transaction', result);
+  return result;
 }
 
 const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER || "whatsapp:+14155238886";
@@ -466,6 +563,13 @@ app.post("/webhook", async (req, res) => {
     } else {
       await reply(from, `Dívida a ${doc.creditor} (que tu deves ${doc.amount} Kz) marcada como paga.`);
     }
+    return res.sendStatus(204);
+  }
+
+  // Command: /stats - Admin only cache statistics
+  if (text === "/stats" && isAdmin(from)) {
+    const stats = getCacheStats();
+    await reply(from, `📊 Cache Stats:\n• Size: ${stats.size} entries\n• Hits: ${stats.hits}\n• Misses: ${stats.misses}\n• Hit rate: ${stats.hitRate}`);
     return res.sendStatus(204);
   }
 
