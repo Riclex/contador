@@ -284,6 +284,8 @@ async function parseDebtOpenAI(text) {
           - Use relevant words from the sentence\
           4. Ambiguity: \
           - ONLY output {'error':'ambiguous'} if no debt relationship can be determined. \
+          - DO NOT parse 'transferi' or 'enviei' as debts - they are transactions.\
+          - DO NOT parse 'paguei' or 'pago' as debts - they are expenses.\
           5. Output: \
           - Output ONLY valid JSON. \
           - No explanations. \
@@ -299,6 +301,10 @@ async function parseDebtOpenAI(text) {
           Output: {'type':'recebido','creditor':'user','debtor':'João','amount':500,'description':'Emprestei 500'}\
           Input: 'Devo 200 a Ana'\
           Output: {'type':'devido','creditor':'Ana','debtor':'user','amount':200,'description':'Devo 200'}\
+          Input: 'Transferi 200000 para Hugo'\
+          Output: {'error':'ambiguous'}\
+          Input: 'Enviei 1000 para a minha conta'\
+          Output: {'error':'ambiguous'}\
           "
       },
       {
