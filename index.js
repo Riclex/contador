@@ -590,10 +590,16 @@ app.post("/webhook", async (req, res) => {
   // Webhook Signature Verification (Sprint 9 - Security)
   const twilioSignature = req.headers['x-twilio-signature'];
   if (twilioSignature) {
-    const url = `${req.protocol}://${req.get('host')}/webhook`;
+    // Support Railway/reverse proxy forwarded headers
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const url = `${protocol}://${host}/webhook`;
+
     const isValid = verifyWebhookSignature(twilioSignature, url, req.body);
     if (!isValid) {
       console.error('Invalid webhook signature from:', req.ip);
+      console.error('Expected URL:', url);
+      console.error('Signature:', twilioSignature?.substring(0, 20) + '...');
       return res.status(401).send('Invalid signature');
     }
   }
