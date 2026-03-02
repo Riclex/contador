@@ -626,47 +626,24 @@ app.post("/webhook", async (req, res) => {
     // Support Railway/reverse proxy forwarded headers
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.headers['x-forwarded-host'] || req.get('host');
-    const port = req.headers['x-forwarded-port'];
+    const url = `${protocol}://${host}/webhook`;
 
-    // Debug headers
-    console.log('[DEBUG] Headers:', {
-      'x-forwarded-proto': req.headers['x-forwarded-proto'],
-      'x-forwarded-host': req.headers['x-forwarded-host'],
-      'x-forwarded-port': req.headers['x-forwarded-port'],
-      'host': req.get('host'),
-      'protocol': req.protocol,
-    });
-
-    // Build host with port if present (Twilio might include it in the signature)
-    const hostWithPort = port && port !== '80' && port !== '443' ? `${host}:${port}` : host;
-
-    // Try multiple URL variations (Twilio might sign with different combinations)
-    const urls = [
-      `${protocol}://${host}/webhook`,
-      `${protocol}://${host}/webhook/`,
-      `${protocol}://${hostWithPort}/webhook`,
-      `${protocol}://${hostWithPort}/webhook/`,
-    ];
-
-    let isValid = false;
-    let computedSignatures = [];
-    for (const url of urls) {
-      const computed = computeWebhookSignature(url, req.rawBody, reqId);
-      computedSignatures.push(`${url} => ${computed?.substring(0, 20)}...`);
-      if (computed === twilioSignature) {
-        isValid = true;
-        console.log('✓ Signature valid for URL:', url);
-        break;
-      }
-    }
+    // Use Twilio's official validateRequest function
+    const isValid = twilio.validateRequest(
+      process.env.TWILIO_AUTH_TOKEN,
+      twilioSignature,
+      url,
+      req.body  // Parsed body object
+    );
 
     if (!isValid) {
       console.error(`[WEBHOOK:${reqId}] Invalid webhook signature from:`, req.ip);
       console.error(`[WEBHOOK:${reqId}] Expected:`, twilioSignature);
-      console.error(`[WEBHOOK:${reqId}] Computed:`, computedSignatures.join(' | '));
-      console.error(`[WEBHOOK:${reqId}] Raw body:`, req.rawBody);
+      console.error(`[WEBHOOK:${reqId}] URL:`, url);
       return res.status(401).send('Invalid signature');
     }
+
+    console.log(`[WEBHOOK:${reqId}] Signature verified successfully`);
   }
 
   const from = req.body.From;
