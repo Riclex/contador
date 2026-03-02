@@ -30,12 +30,15 @@ function computeWebhookSignature(url, rawBody) {
   const sortedKeys = Object.keys(params).sort();
 
   // Build signature string: url + key1value1 + key2value2 + ...
+  // Handle empty/undefined values (e.g., "key=" or "key" with no =)
   let sortedParams = '';
   for (const key of sortedKeys) {
-    sortedParams += `${key}${params[key]}`;
+    sortedParams += `${key}${params[key] || ''}`;
   }
 
   const urlAndParams = url + sortedParams;
+  // Debug: log the exact data being signed (first 200 chars)
+  console.log(`[DEBUG] Signing: ${urlAndParams.substring(0, 200)}...`);
   return crypto
     .createHmac('sha256', process.env.TWILIO_AUTH_TOKEN)
     .update(urlAndParams)
@@ -615,11 +618,26 @@ app.post("/webhook", async (req, res) => {
     // Support Railway/reverse proxy forwarded headers
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.headers['x-forwarded-host'] || req.get('host');
+    const port = req.headers['x-forwarded-port'];
 
-    // Try multiple URL variations (Twilio might sign with or without trailing slash)
+    // Debug headers
+    console.log('[DEBUG] Headers:', {
+      'x-forwarded-proto': req.headers['x-forwarded-proto'],
+      'x-forwarded-host': req.headers['x-forwarded-host'],
+      'x-forwarded-port': req.headers['x-forwarded-port'],
+      'host': req.get('host'),
+      'protocol': req.protocol,
+    });
+
+    // Build host with port if present (Twilio might include it in the signature)
+    const hostWithPort = port && port !== '80' && port !== '443' ? `${host}:${port}` : host;
+
+    // Try multiple URL variations (Twilio might sign with different combinations)
     const urls = [
       `${protocol}://${host}/webhook`,
       `${protocol}://${host}/webhook/`,
+      `${protocol}://${hostWithPort}/webhook`,
+      `${protocol}://${hostWithPort}/webhook/`,
     ];
 
     let isValid = false;
