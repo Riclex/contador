@@ -141,7 +141,15 @@ function parseTransactionRegex(text) {
   } else {
     // Pattern: "de/do/da X" (existing logic)
     const descMatch = normalized.match(/(?:de|do|da)\s+(.+?)(?:\b|$)/);
-    description = descMatch ? descMatch[1].trim() : '';
+    if (descMatch) {
+      description = descMatch[1].trim();
+    } else {
+      // Pattern: "em X" (e.g., "gastei 1000 em compras", "recebi 500 em dinheiro")
+      const emMatch = normalized.match(/em\s+(.+?)(?:\b|$)/);
+      if (emMatch) {
+        description = emMatch[1].trim();
+      }
+    }
   }
 
   return { type, amount, description };
@@ -583,6 +591,12 @@ async function parseTransaction(text) {
             Output: {'type':'income','amount':2500,'description':'biolo'}\
             Input: 'Paiei 3000 paus num wi'\
             Output: {'type':'income','amount':3000,'description':'wi'}\
+            Input: 'Gastei 7000kz em compras'\
+            Output: {'type':'expense','amount':7000,'description':'compras'}\
+            Input: 'Recebi 1000 kz em dinheiro'\
+            Output: {'type':'income','amount':1000,'description':'dinheiro'}\
+            Input: 'Paguei 500 em saldo'\
+            Output: {'type':'expense','amount':500,'description':'saldo'}\
             "
         },
         {
