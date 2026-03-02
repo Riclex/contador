@@ -14,7 +14,7 @@ const EXPENSE_VERBS = ['comprei', 'gastei', 'paguei', 'gasto', 'pagamento', 'emp
 const AMOUNT_REGEX = /(\d[\d\s]*?)\s*(?:kz|paus)?$/i;
 
 // --- Webhook Signature Verification
-function computeWebhookSignature(url, rawBody) {
+function computeWebhookSignature(url, rawBody, reqId = 'none') {
   if (!process.env.TWILIO_AUTH_TOKEN) return null;
 
   // Parse raw body WITHOUT decoding - Twilio signs the exact URL-encoded string
@@ -38,7 +38,8 @@ function computeWebhookSignature(url, rawBody) {
 
   const urlAndParams = url + sortedParams;
   // Debug: log the exact data being signed (first 200 chars)
-  console.log(`[DEBUG] Signing: ${urlAndParams.substring(0, 200)}...`);
+  console.log(`[DEBUG:${reqId}] Signing data (first 200 chars): ${urlAndParams.substring(0, 200)}...`);
+  console.log(`[DEBUG:${reqId}] First 5 params:`, sortedKeys.slice(0, 5).map(k => ({key: k, value: params[k]?.substring(0, 30)}));
   return crypto
     .createHmac('sha256', process.env.TWILIO_AUTH_TOKEN)
     .update(urlAndParams)
@@ -613,9 +614,12 @@ async function reply(to, body) {
 // --- Routes
 app.post("/webhook", async (req, res) => {
   // Webhook Signature Verification (Sprint 9 - Security)
-  console.log('[WEBHOOK] Received request, rawBody length:', req.rawBody?.length);
-  console.log('[WEBHOOK] rawBody preview:', req.rawBody?.substring(0, 300));
-  console.log('[WEBHOOK] parsed Body:', req.body?.Body);
+  // Generate request ID for tracking logs
+  const reqId = Math.random().toString(36).substring(2, 8);
+  req.reqId = reqId;
+  console.log(`[WEBHOOK:${reqId}] Received request, rawBody length:`, req.rawBody?.length);
+  console.log(`[WEBHOOK:${reqId}] rawBody preview:`, req.rawBody?.substring(0, 300));
+  console.log(`[WEBHOOK:${reqId}] parsed Body:`, req.body?.Body);
 
   const twilioSignature = req.headers['x-twilio-signature'];
   if (twilioSignature && process.env.TWILIO_AUTH_TOKEN) {
@@ -647,7 +651,7 @@ app.post("/webhook", async (req, res) => {
     let isValid = false;
     let computedSignatures = [];
     for (const url of urls) {
-      const computed = computeWebhookSignature(url, req.rawBody);
+      const computed = computeWebhookSignature(url, req.rawBody, reqId);
       computedSignatures.push(`${url} => ${computed?.substring(0, 20)}...`);
       if (computed === twilioSignature) {
         isValid = true;
@@ -657,10 +661,10 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (!isValid) {
-      console.error('Invalid webhook signature from:', req.ip);
-      console.error('Expected:', twilioSignature);
-      console.error('Computed:', computedSignatures.join(' | '));
-      console.error('Raw body:', req.rawBody?.substring(0, 200));
+      console.error(`[WEBHOOK:${reqId}] Invalid webhook signature from:`, req.ip);
+      console.error(`[WEBHOOK:${reqId}] Expected:`, twilioSignature);
+      console.error(`[WEBHOOK:${reqId}] Computed:`, computedSignatures.join(' | '));
+      console.error(`[WEBHOOK:${reqId}] Raw body:`, req.rawBody);
       return res.status(401).send('Invalid signature');
     }
   }
