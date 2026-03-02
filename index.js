@@ -267,6 +267,20 @@ function getCacheStats() {
 }
 
 const app = express();
+
+// Middleware to capture raw body for Twilio signature verification
+app.use((req, res, next) => {
+  let data = '';
+  req.setEncoding('utf8');
+  req.on('data', (chunk) => {
+    data += chunk;
+  });
+  req.on('end', () => {
+    req.rawBody = data;
+    next();
+  });
+});
+
 app.use(bodyParser.urlencoded({ extended: false }));
 
 // --- Environment Validation
@@ -589,17 +603,22 @@ async function reply(to, body) {
 app.post("/webhook", async (req, res) => {
   // Webhook Signature Verification (Sprint 9 - Security)
   const twilioSignature = req.headers['x-twilio-signature'];
-  if (twilioSignature) {
+  if (twilioSignature && process.env.TWILIO_AUTH_TOKEN) {
     // Support Railway/reverse proxy forwarded headers
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.headers['x-forwarded-host'] || req.get('host');
     const url = `${protocol}://${host}/webhook`;
 
-    const isValid = verifyWebhookSignature(twilioSignature, url, req.body);
+    // Parse raw body for signature verification (Twilio signs the URL-encoded string)
+    const params = new URLSearchParams(req.rawBody || '');
+    const bodyObject = Object.fromEntries(params);
+
+    const isValid = verifyWebhookSignature(twilioSignature, url, bodyObject);
     if (!isValid) {
       console.error('Invalid webhook signature from:', req.ip);
       console.error('Expected URL:', url);
       console.error('Signature:', twilioSignature?.substring(0, 20) + '...');
+      console.error('Raw body length:', req.rawBody?.length || 0);
       return res.status(401).send('Invalid signature');
     }
   }
