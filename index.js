@@ -613,6 +613,10 @@ async function reply(to, body) {
 // --- Routes
 app.post("/webhook", async (req, res) => {
   // Webhook Signature Verification (Sprint 9 - Security)
+  console.log('[WEBHOOK] Received request, rawBody length:', req.rawBody?.length);
+  console.log('[WEBHOOK] rawBody preview:', req.rawBody?.substring(0, 300));
+  console.log('[WEBHOOK] parsed Body:', req.body?.Body);
+
   const twilioSignature = req.headers['x-twilio-signature'];
   if (twilioSignature && process.env.TWILIO_AUTH_TOKEN) {
     // Support Railway/reverse proxy forwarded headers
