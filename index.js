@@ -268,20 +268,13 @@ function getCacheStats() {
 
 const app = express();
 
-// Middleware to capture raw body for Twilio signature verification
-app.use((req, res, next) => {
-  let data = '';
-  req.setEncoding('utf8');
-  req.on('data', (chunk) => {
-    data += chunk;
-  });
-  req.on('end', () => {
-    req.rawBody = data;
-    next();
-  });
-});
-
-app.use(bodyParser.urlencoded({ extended: false }));
+// body-parser with raw body capture for Twilio signature verification
+app.use(bodyParser.urlencoded({
+  extended: false,
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString('utf8');
+  }
+}));
 
 // --- Environment Validation
 const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"];
