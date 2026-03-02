@@ -14,10 +14,8 @@ const EXPENSE_VERBS = ['comprei', 'gastei', 'paguei', 'gasto', 'pagamento', 'emp
 const AMOUNT_REGEX = /(\d[\d\s]*?)\s*(?:kz|paus)?$/i;
 
 // --- Webhook Signature Verification
-function verifyWebhookSignature(signature, url, body) {
-  if (!signature || !process.env.TWILIO_AUTH_TOKEN) {
-    return false;
-  }
+function computeWebhookSignature(url, body) {
+  if (!process.env.TWILIO_AUTH_TOKEN) return null;
 
   // Sort body parameters alphabetically
   const sortedParams = Object.keys(body)
@@ -26,12 +24,17 @@ function verifyWebhookSignature(signature, url, body) {
     .join('');
 
   const urlAndParams = url + sortedParams;
-  const hash = crypto
+  return crypto
     .createHmac('sha256', process.env.TWILIO_AUTH_TOKEN)
     .update(urlAndParams)
     .digest('base64');
+}
 
-  return signature === hash;
+function verifyWebhookSignature(signature, url, body) {
+  if (!signature || !process.env.TWILIO_AUTH_TOKEN) {
+    return false;
+  }
+  return signature === computeWebhookSignature(url, body);
 }
 
 // --- Rate Limiting
@@ -600,18 +603,34 @@ app.post("/webhook", async (req, res) => {
     // Support Railway/reverse proxy forwarded headers
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.headers['x-forwarded-host'] || req.get('host');
-    const url = `${protocol}://${host}/webhook`;
+
+    // Try multiple URL variations (Twilio might sign with or without trailing slash)
+    const urls = [
+      `${protocol}://${host}/webhook`,
+      `${protocol}://${host}/webhook/`,
+    ];
 
     // Parse raw body for signature verification (Twilio signs the URL-encoded string)
     const params = new URLSearchParams(req.rawBody || '');
     const bodyObject = Object.fromEntries(params);
 
-    const isValid = verifyWebhookSignature(twilioSignature, url, bodyObject);
+    let isValid = false;
+    let computedSignatures = [];
+    for (const url of urls) {
+      const computed = computeWebhookSignature(url, bodyObject);
+      computedSignatures.push(`${url} => ${computed?.substring(0, 20)}...`);
+      if (computed === twilioSignature) {
+        isValid = true;
+        console.log('✓ Signature valid for URL:', url);
+        break;
+      }
+    }
+
     if (!isValid) {
       console.error('Invalid webhook signature from:', req.ip);
-      console.error('Expected URL:', url);
-      console.error('Signature:', twilioSignature?.substring(0, 20) + '...');
-      console.error('Raw body length:', req.rawBody?.length || 0);
+      console.error('Expected:', twilioSignature?.substring(0, 30));
+      console.error('Computed:', computedSignatures.join(' | '));
+      console.error('Sorted params:', Object.keys(bodyObject).sort().map(k => `${k}${bodyObject[k]}`).join('').substring(0, 100));
       return res.status(401).send('Invalid signature');
     }
   }
