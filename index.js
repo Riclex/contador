@@ -39,7 +39,7 @@ function computeWebhookSignature(url, rawBody, reqId = 'none') {
   const urlAndParams = url + sortedParams;
   // Debug: log the exact data being signed (first 200 chars)
   console.log(`[DEBUG:${reqId}] Signing data (first 200 chars): ${urlAndParams.substring(0, 200)}...`);
-  console.log(`[DEBUG:${reqId}] First 5 params:`, sortedKeys.slice(0, 5).map(k => ({key: k, value: params[k]?.substring(0, 30)}));
+  console.log(`[DEBUG:${reqId}] Param keys:`, sortedKeys.slice(0, 10));
   return crypto
     .createHmac('sha256', process.env.TWILIO_AUTH_TOKEN)
     .update(urlAndParams)
