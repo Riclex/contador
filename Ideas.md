@@ -223,6 +223,86 @@ Risk: High churn if it's just a "tracker" and not a "utility" (like generating i
 - [ ] **E2E Tests:** Simular conversas reais com Twilio sandbox
 - [ ] **Load Tests:** Verificar comportamento sob carga (k6 ou artillery)
 
+## Sprint 13: Comandos por Voz - Inclusão para Baixa Literacia (Prioridade Alta)
+**Objetivo:** Permitir que usuários com baixa literacia usem o bot através de notas de voz
+
+### Contexto
+- **Público-alvo:** Usuários com dificuldade de leitura/escrita em Angola
+- **Comportamento:** Já enviam áudios no WhatsApp naturalmente
+- **Barreira:** Não precisam digitar, apenas falar em Português/Angolano
+
+### Arquitetura
+```
+Áudio do Usuário (WhatsApp)
+         ↓
+Twilio Webhook (MediaUrl0)
+         ↓
+Download do arquivo .ogg (codec: OPUS)
+         ↓
+OpenAI GPT-4o Mini Transcribe ($0.003/min)
+         ↓
+Texto transcrito em Português
+         ↓
+parseTransaction() / parseDebt() (fluxo atual)
+         ↓
+Resposta com confirmação
+```
+
+### Tarefas de Implementação
+
+#### Infraestrutura
+- [ ] **Handler de Mídia Twilio:** Processar `MediaUrl0` e `MediaContentType0` no webhook
+- [ ] **Download Autenticado:** GET request com credenciais Twilio para baixar áudio
+- [ ] **Format Conversion:** Converter .ogg → formato compatível (se necessário)
+- [ ] **Detecção de Tipo:** Distinguir voz (`voice: true`) de áudio normal
+
+#### Integração STT
+- [ ] **OpenAI Transcribe Integration:** Enviar áudio para GPT-4o Mini Transcribe
+- [ ] **Prompt de Transcrição:** Otimizar para Português Angolano (gírias, code-switching)
+- [ ] **Fallback Handling:** Quando transcrição falhar, pedir para usuário repetir
+- [ ] **Error Messages:** Respostas amigáveis para falhas de transcrição
+
+#### Otimização de Custos
+- [ ] **Duration Check:** Ignorar áudios > 2 min (muito longos, custo alto)
+- [ ] **Cache de Áudio:** Hash do áudio para evitar retranscrição de mensagens idênticas
+- [ ] **Regex First:** Tentar padrões simples antes de chamar STT
+
+#### Testes & Validação
+- [ ] **Testes de Sotaque:** Validar com falantes de Português Angolano
+- [ ] **Background Noise:** Testar em ambientes com ruído (comum em mobile)
+- [ ] **Code-Switching:** Testar misturas com termos locais (kwanza, "muamba", etc.)
+
+### Estimativa de Custo Mensal
+
+| Volume | Áudio (30s avg) | Transcribe | Twilio Mídia | **Total/Mês** |
+|--------|-----------------|------------|--------------|---------------|
+| 100/dia | 1.500 min | $4,50 | $15 | **~$20-40** |
+| 300/dia | 4.500 min | $13,50 | $45 | **~$60-120** |
+| 500/dia | 7.500 min | $22,50 | $75 | **~$100-200** |
+
+**Recomendado:** OpenAI GPT-4o Mini Transcribe ($0.003/min) - melhor custo/benefício
+
+### Riscos & Mitigações
+
+| Risco | Impacto | Mitigação |
+|-------|---------|-----------|
+| Baixa precisão (sotaque AO) | Alto | Testes extensivos, fallback para texto |
+| Áudios muito longos | Médio | Limite de 2 min, aviso ao usuário |
+| Ruído ambiente | Médio | GPT-4o lida melhor que Whisper |
+| Custo imprevisível | Baixo | Cache, limites diários |
+
+### Critérios de Aceite
+- [ ] Usuário pode enviar áudio de até 2 minutos
+- [ ] Transcrição precisa em >85% dos casos (testado com Angolanos)
+- [ ] Fallback elegante quando falha
+- [ ] Custo mensal dentro do orçamento (<$100 para 300 msgs/dia)
+- [ ] Fluxo de confirmação mantém segurança (não registra sem "sim")
+
+### Dependências
+- Twilio WhatsApp API (já configurado)
+- OpenAI API key com acesso a Transcribe
+- Testadores nativos de Português Angolano
+
   The code is fully implemented with:
   - Debts collection with indexes
   - Regex parser for 5 debt patterns (including Portuguese names with special chars)

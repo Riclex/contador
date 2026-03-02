@@ -17,18 +17,22 @@ const AMOUNT_REGEX = /(\d[\d\s]*?)\s*(?:kz|paus)?$/i;
 function computeWebhookSignature(url, rawBody) {
   if (!process.env.TWILIO_AUTH_TOKEN) return null;
 
-  // Parse raw body while preserving original values (Twilio signs URL-encoded form)
-  const params = new URLSearchParams(rawBody);
-  const sortedKeys = Array.from(params.keys()).sort();
+  // Parse raw body WITHOUT decoding - Twilio signs the exact URL-encoded string
+  const params = {};
+  for (const pair of (rawBody || '').split('&')) {
+    const [key, ...valueParts] = pair.split('=');
+    if (key) {
+      params[key] = valueParts.join('='); // Keep value exactly as-is
+    }
+  }
+
+  // Sort keys alphabetically
+  const sortedKeys = Object.keys(params).sort();
 
   // Build signature string: url + key1value1 + key2value2 + ...
-  // Note: Twilio expects values as they appear in the raw body (URL-encoded)
   let sortedParams = '';
   for (const key of sortedKeys) {
-    // Get the raw value (URLSearchParams decodes, so we need to re-encode)
-    const rawValue = params.get(key) || '';
-    const encodedValue = encodeURIComponent(rawValue).replace(/%20/g, '+');
-    sortedParams += `${key}${encodedValue}`;
+    sortedParams += `${key}${params[key]}`;
   }
 
   const urlAndParams = url + sortedParams;
