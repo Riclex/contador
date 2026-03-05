@@ -278,7 +278,7 @@ function parseDebtRegex(text) {
     };
   }
 
-  // Pattern 3: "Eu devo 1500 ao Maria" - User owes someone (name after 'ao' or 'a')
+  // Pattern 3: "Eu devo 1500 a Maria" - User owes someone (name after 'ao' or 'a')
   const pattern3 = /eu\s+devo\s+(\d+)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
   const match3 = normalized.match(pattern3);
   if (match3) {
@@ -486,7 +486,7 @@ async function hasGivenConsent(userPhone) {
 async function sendWelcomeMessage(userPhone) {
   const welcomeMessage = `Boas! 👋 Sou o Contador, o teu assistente financeiro no WhatsApp.
 
-Regista vendas, gastos e fiados só mandando mensagens.
+Regista vendas, gastos e kilapis só mandando mensagens.
 
 Exemplos:
 • "vendi 5000 pão"
@@ -1068,7 +1068,7 @@ Sistema:
 • "vendi 1000 pão"
 • "comprei 500 saldo"
 • "João me deve 2000"
-• "eu devo 1000 ao Maria"
+• "eu devo 1000 a Maria"
 
 🔒 PRIVACIDADE:
 • /meusdados - Ver teus dados
