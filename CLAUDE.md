@@ -17,6 +17,7 @@ This is a single-file Express.js application with a simple architecture:
   - Income: vendi, recebi, ganhei, paiei, biolo, fezada
   - Expense: comprei, gastei, paguei, gasto, pagamento, emprestei, transferi, enviei
   - Debt: "X me deve", "eu devo", "devo", "emprestei a"
+  - Description extraction: "de/do/da X", "para X", "em X" (e.g., "gastei 1000 em compras")
 - **Messaging**: Twilio WhatsApp API for user communication
 - **Session Management**: MongoDB-backed with in-memory cache - sessions persist across restarts with 30min TTL
 - **Deduplication**: `processedMessages` Set tracks `MessageSid` values with a 10,000 message FIFO limit to prevent memory leaks
@@ -46,6 +47,7 @@ This is a single-file Express.js application with a simple architecture:
    - First tries regex-based parsing (fast, free) for standard patterns
    - Falls back to OpenAI for ambiguous cases
    - Extracts `type` (income/expense), `amount`, and `description`
+   - Description patterns (in order): "para X" (transfers), "de/do/da X" (purchases), "em X" (expenses/income)
    - Safe regex patterns prevent ReDoS attacks
 
 3. **Debt Parsing** (`parseDebt`): Hybrid parser that:

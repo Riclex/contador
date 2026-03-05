@@ -4,7 +4,7 @@
 | ---                   ----------------------------------------- | ------------------------------------------------------------------------------------------------   |
 | **UX Sem Fricção:** Zero instalação de app, interface familiar. | **Dependência de Plataforma:** Totalmente refém das políticas do WhatsApp/Meta e preços do Twilio. |
 | **Localização:** Foco no Kwanza e linguagem natural angolana (ex: "saldo", "recarga"). | **Custo Variável Alto:** Cada mensagem custa (Twilio) e cada processamento inteligente custa (OpenAI). |
-| **Stack Moderna:** Node.js + GPT + MongoDB é escalável e robusto. | **Conectividade:** Depende da estabilidade da rede de dados (embora o WhatsApp funcione bem com 2G/3G). |
+| **Stack Moderna:** Node.js + GPT + MongoDB é escalável e robusta. | **Conectividade:** Depende da estabilidade da rede de dados (embora o WhatsApp funcione bem com 2G/3G). |
 
 | **Oportunidades (Opportunities)** | **Ameaças (Threats)** |
 | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
@@ -42,6 +42,67 @@ A. Modelo Freemium (B2C)
 
 - Se o usuário registra muitas despesas de "farinha" ou "transporte", você pode vender espaços publicitários no relatório semanal para fornecedores desses insumos.
 - *Nota:* Cuidado com as políticas do WhatsApp sobre marketing não solicitado.
+
+# E. Integrações com Outras Aplicações Financeiras
+
+## Oportunidades de Integração
+
+Contador pode posicionar-se como **hub central de dados financeiros**, integrando-se com o ecossistema financeiro Angolano:
+
+### 1. Integração com Bancos Digitais
+- **BAI Direct / Atlântico Online:** Importar transações bancárias automaticamente
+- **Unitel Money:** Sincronizar saldo e movimentos da carteira digital
+- **PayPay:** Extrair dados de pagamentos mobile
+- **Valor:** Usuário vê todas as finanças num só lugar
+
+### 2. APIs de Pagamento
+- **Multicaixa Express:** Link para pagamentos diretos
+- **Unitel Money API:** Transferências via comando do bot
+- **Stripe/PayPal:** Para recebimentos internacionais (diaspora)
+- **Valor:** Registrar pagamento automaticamente quando confirmado
+
+### 3. Plataformas de E-commerce
+- **Shopify/WooCommerce:** Importar vendas automáticas
+- **Instagram/Facebook Shops:** Rastrear vendas sociais
+- **Valor:** Contabilidade automática para vendedores digitais
+
+### 4. Ferramentas de Produtividade
+- **Google Sheets:** Exportação bidirecional (já planejado)
+- **Notion:** Dashboards financeiros
+- **Valor:** Flexibilidade para power users
+
+### 5. Serviços de Contabilidade
+- **Parceria com contabilistas:** Exportação formatada para contabilidade
+- **Automação de relatórios fiscais:** IVA, declarações
+- **Valor:** Micro-empresários cumprem obrigações legais
+
+### 6. Apps de Investimento
+- **Bolsas de valores:** Rastrear investimentos (quando disponíveis em Angola)
+- **Poupança digital:** Sugestões de aplicação baseadas em perfil
+- **Valor:** Evolução de tracker para conselheiro financeiro
+
+### Considerações para Integrações
+
+| Aspecto | Desafio | Solução |
+|---------|---------|---------|
+| **APIs bancárias** | Bancos Angolanos não têm APIs abertas | Screen scraping (complexo) ou parcerias B2B |
+| **Segurança** | Credenciais bancárias são sensíveis** | OAuth, nunca armazenar passwords |
+| **Custo** | APIs pagas aumentam burn rate | Freemium: integrações só na versão Pro |
+| **Regulação** | Banco Nacional de Angola (BNA) | Compliance desde o início |
+
+### Roadmap de Integrações
+
+**Fase 1 (MVP+):**
+- [ ] Google Sheets (exportação)
+- [ ] CSV genérico (import/export)
+
+**Fase 2 (Scale):**
+- [ ] Unitel Money (se API disponível)
+- [ ] Parceria com 1 banco digital
+
+**Fase 3 (Platform):**
+- [ ] Open Banking (quando regulamentado em Angola)
+- [ ] API pública do Contador para outros devs
 
 # Sugestões de Melhoria Imediata
 
@@ -150,13 +211,82 @@ Risk: High churn if it's just a "tracker" and not a "utility" (like generating i
 - [ ] **Infraestrutura Empresarial:** Custo cobrado via parceria, não via API key do usuário
 - [ ] **Relatórios para Empresa:** Painel administrativo para ver métricas de usuários
 
-## Sprint 7: Inclusão Financeira & Micro-crédito (Prioridade Baixa)
-**Objetivo:** Tornar o bot um "score alternativo" para quem não tem conta bancária
+## Sprint 7: Educação Financeira & Inclusão (Prioridade Alta)
+**Objetivo:** Transformar Contador em ferramenta de educação financeira para a população Angolana
+
+### Contexto
+A educação financeira é crítica em Angola devido a:
+- Alta inflação e instabilidade do Kwanza
+- Baixa penetração de serviços bancários formais
+- Cultura predominante de economia informal
+- Falta de conteúdo financeiro em Português para contexto Angolano
+
+O WhatsApp tem alta penetração e baixa barreira de entrada, tornando-o canal ideal para educação financeira bite-sized.
+
+### Funcionalidades de Educação Financeira
+
+#### 1. Dicas Contextuais (Contextual Tips)
+- **Trigger:** Após transações específicas
+- **Exemplos:**
+  - *"Você gastou 5000 Kz em restaurantes esta semana. Dica: definir um orçamento semanal ajuda a controlar gastos variáveis."*
+  - *"Recebeu 50.000 Kz. Dica: a regra 50/30/20 sugere guardar 20% (10.000 Kz) para emergências."*
+- **Implementação:** LLM analisa padrão de gastos + base de dicas localizadas
+
+#### 2. Insights de Gastos (Spending Insights)
+- **Comando:** `/analise` ou envio semanal automático
+- **Conteúdo:**
+  - Comparativo mês a mês ("Seus gastos em transporte aumentaram 30%")
+  - Categorização automática de despesas
+  - Identificação de "vilões" de gasto
+- **Formato:** Mensagem curta, linguagem simples
+
+#### 3. Metas de Poupança (Goal Tracking)
+- **Comando:** `/meta [valor] [descrição]` - Ex: `/meta 100000 emergência`
+- **Funcionalidade:**
+  - Acompanhamento de progresso
+  - Lembretes motivacionais periódicos
+  - Cálculo de tempo estimado para atingir meta
+- **Exemplo:** *"Faltam 15.000 Kz para sua meta de emergência. Se continuar assim, atinge em 3 semanas!"*
+
+#### 4. Comando de Aprendizado On-Demand
+- **Comando:** `/dica` - Envia dica aleatória de educação financeira
+- **Comando:** `/orcamento` - Guia interativo para criar orçamento mensal
+- **Comando:** `/poupanca` - Explica métodos de poupança (caixinhas, bancos, etc.)
+
+#### 5. Alertas Inteligentes
+- **Trigger:** Quando gasto ultrapassa X% do orçamento definido
+- **Mensagem:** *"Atenção: já gastou 80% do seu orçamento de transporte este mês."*
+
+#### 6. Conteúdo Localizado
+- Dicas adaptadas à realidade Angolana:
+  - Como poupar com inflação alta
+  - Alternativas a bancos tradicionais (Unitel Money, etc.)
+  - Gestão de negócio informal (kandengue, zungueiras)
+  - Diferença entre preços em Kwanza e USD
+
+### Considerações de Implementação
+
+#### UX - Manter Opcional
+- Dicas só aparecem após transações (não spammam usuário)
+- Comando `/silenciar` para desativar dicas
+- Frequência máxima: 1 dica por dia, 3 por semana
+
+#### Localização
+- Termos em Português Angolano ("kitambo", "bazar", "kandengue")
+- Contexto econômico local (inflação, informalidade)
+- Referências culturais relevantes
+
+#### Custos
+- Usar regex para padrões comuns de análise (grátis)
+- LLM apenas para análises complexas
+- Cache de dicas populares
+
+### Sprint 7: Inclusão Financeira & Micro-crédito (continuação)
 
 - [ ] **Histórico de Vendas:** Dados estruturados para apresentar a instituições de crédito
 - [ ] **Score Financeiro:** Algoritmo simples de score baseado no padrão de transações
 - [ ] **Parceria com Microcrédito:** Comissão por lead gerado (usuário recebe melhor taxa)
-- [ ] **Conselhos Financeiros:** IA dá dicas baseadas no comportamento do usuário
+- [x] **Conselhos Financeiros:** IA dá dicas baseadas no comportamento do usuário (em planejamento)
 
 ## Sprint 8: Mulimódico (Prioridade Baixa)
 **Objetivo:** Expansão geográfica e linguística
@@ -183,6 +313,10 @@ Risk: High churn if it's just a "tracker" and not a "utility" (like generating i
 - [ ] **Structured Logging:** Implementar Winston/Pino para logs estruturados
 - [x] **Session Persistence:** MongoDB-backed sessions with 30min TTL
 - [ ] **Schema Validation:** Usar Zod/Joi para validar inputs
+- [ ] **Redis para Cache Compartilhado:** Substituir cache em memória por Redis (multi-instância)
+- [ ] **Redis para Rate Limiting:** Rate limiting persistente (sobrevive a restarts)
+- [ ] **Message Queue (Bull/RabbitMQ):** Filas para chamadas OpenAI (rate limiting, retry)
+- [ ] **Cache Warming on Startup:** Pré-carregar cache popular após restart
 
 ### Observabilidade - **PARCIAL**
 - [ ] **Dashboard de Monitoramento:** Cache hit rate, erros, latência

@@ -57,6 +57,96 @@ function verifyWebhookSignature(signature, url, rawBody) {
 const MAX_MESSAGES_PER_USER_PER_DAY = 50;
 const rateLimitStore = new Map();
 
+// --- Stats Cache (5 minute TTL)
+const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
+let statsCache = {
+  data: null,
+  timestamp: 0
+};
+
+async function getDailyMetrics() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  // New users (first_use events today)
+  const newUsers = await events.countDocuments({
+    event_name: 'first_use',
+    timestamp: { $gte: today, $lt: tomorrow }
+  });
+
+  // Active users (unique users with events today)
+  const activeUsersAgg = await events.aggregate([
+    { $match: { timestamp: { $gte: today, $lt: tomorrow } } },
+    { $group: { _id: '$user_hash' } },
+    { $count: 'count' }
+  ]).toArray();
+  const activeUsers = activeUsersAgg[0]?.count || 0;
+
+  // Total messages (message_sent events today)
+  const totalMessages = await events.countDocuments({
+    event_name: 'message_sent',
+    timestamp: { $gte: today, $lt: tomorrow }
+  });
+
+  // Confirmed transactions today
+  const confirmedTransactions = await events.countDocuments({
+    event_name: 'transaction_confirmed',
+    timestamp: { $gte: today, $lt: tomorrow }
+  });
+
+  // Debts created today
+  const debtsCreated = await events.countDocuments({
+    event_name: 'debt_created',
+    timestamp: { $gte: today, $lt: tomorrow }
+  });
+
+  return {
+    newUsers,
+    activeUsers,
+    totalMessages,
+    confirmedTransactions,
+    debtsCreated
+  };
+}
+
+async function getEnhancedStats() {
+  // Check cache
+  if (statsCache.data && Date.now() - statsCache.timestamp < STATS_CACHE_TTL_MS) {
+    return statsCache.data;
+  }
+
+  const [dailyMetrics, cacheStats] = await Promise.all([
+    getDailyMetrics(),
+    Promise.resolve(getCacheStats())
+  ]);
+
+  // Calculate uptime
+  const uptime = process.uptime();
+  const uptimeDays = Math.floor(uptime / 86400);
+  const uptimeHours = Math.floor((uptime % 86400) / 3600);
+  const uptimeMins = Math.floor((uptime % 3600) / 60);
+
+  const stats = {
+    today: dailyMetrics,
+    cache: cacheStats,
+    system: {
+      uptime: `${uptimeDays}d ${uptimeHours}h ${uptimeMins}m`,
+      mongodb: mongoConnected ? '✅' : '❌',
+      timestamp: new Date().toISOString()
+    }
+  };
+
+  // Update cache
+  statsCache = {
+    data: stats,
+    timestamp: Date.now()
+  };
+
+  return stats;
+}
+
 function checkRateLimit(userPhone) {
   const today = new Date().toDateString();
   const key = `${userPhone}:${today}`;
@@ -282,17 +372,6 @@ function setCachedResponse(text, type, data) {
   });
 }
 
-function getCacheStats() {
-  const total = cacheHits + cacheMisses;
-  const hitRate = total > 0 ? ((cacheHits / total) * 100).toFixed(1) : 0;
-  return {
-    size: responseCache.size,
-    hits: cacheHits,
-    misses: cacheMisses,
-    hitRate: `${hitRate}%`
-  };
-}
-
 const app = express();
 
 // body-parser with raw body capture for Twilio signature verification
@@ -351,6 +430,86 @@ mongo.on('close', () => {
 const db = mongo.db();
 const transactions = db.collection("transactions");
 const debts = db.collection("debts");
+const events = db.collection("events");
+
+// --- Event Tracking System
+events.createIndex({ event_name: 1, timestamp: -1 });
+events.createIndex({ user_hash: 1, timestamp: -1 });
+
+async function logEvent(eventName, userPhone, metadata = {}) {
+  try {
+    // Create hash of phone for privacy
+    const userHash = crypto.createHash('sha256').update(userPhone).digest('hex').substring(0, 16);
+
+    const eventDoc = {
+      event_name: eventName,
+      user_hash: userHash,
+      user_phone: userPhone, // Keep raw for internal use, could be removed for stricter privacy
+      timestamp: new Date(),
+      metadata: metadata
+    };
+
+    // Store in MongoDB
+    await events.insertOne(eventDoc);
+
+    // Also log to console in JSON format for easy parsing
+    console.log(JSON.stringify({
+      type: 'event',
+      event: eventName,
+      user_hash: userHash,
+      timestamp: new Date().toISOString(),
+      ...metadata
+    }));
+  } catch (err) {
+    // Fail silently - don't break user experience if logging fails
+    console.error('Event logging error:', err.message);
+  }
+}
+
+// --- User Onboarding
+const ONBOARDING_STATE_KEY = 'onboarding_state';
+
+async function isNewUser(userPhone) {
+  // Check if user has any previous transactions or events
+  const userEvents = await events.findOne({ user_phone: userPhone });
+  return !userEvents;
+}
+
+async function hasGivenConsent(userPhone) {
+  const userEvents = await events.findOne({
+    user_phone: userPhone,
+    event_name: 'consent_given'
+  });
+  return !!userEvents;
+}
+
+async function sendWelcomeMessage(userPhone) {
+  const welcomeMessage = `Boas! 👋 Sou o Contador, o teu assistente financeiro no WhatsApp.
+
+Regista vendas, gastos e fiados só mandando mensagens.
+
+Exemplos:
+• "vendi 5000 pão"
+• "João me deve 2000"
+• "hoje" (vê saldo)
+
+Aceitas que guardemos os teus dados para fazer os cálculos? Responde "sim" para continuar.`;
+
+  await reply(userPhone, welcomeMessage);
+}
+
+async function setOnboardingState(userPhone, state) {
+  await db.collection('onboarding').updateOne(
+    { user_phone: userPhone },
+    { $set: { state, updated_at: new Date() } },
+    { upsert: true }
+  );
+}
+
+async function getOnboardingState(userPhone) {
+  const doc = await db.collection('onboarding').findOne({ user_phone: userPhone });
+  return doc?.state || 'completed';
+}
 
 // Create indexes on debts collection
 await debts.createIndex({ user_phone: 1, settled: 1 });
@@ -666,6 +825,37 @@ app.post("/webhook", async (req, res) => {
   const text = normalize(sanitizeInput(rawText));
   const messageSid = req.body.MessageSid;
 
+  // Log message_sent event
+  await logEvent('message_sent', from, { message_length: rawText.length, message_type: 'unknown' });
+
+  // Check if this is a new user
+  const userIsNew = await isNewUser(from);
+  if (userIsNew) {
+    await logEvent('first_use', from, { source: 'whatsapp' });
+    await setOnboardingState(from, 'awaiting_consent');
+    await sendWelcomeMessage(from);
+    return res.sendStatus(204);
+  }
+
+  // Check onboarding state
+  const onboardingState = await getOnboardingState(from);
+  if (onboardingState === 'awaiting_consent') {
+    if (text === 'sim') {
+      await logEvent('consent_given', from, {});
+      await setOnboardingState(from, 'completed');
+      await reply(from, `Perfeito! Podes começar a usar o Contador.
+
+Experimenta mandar algo como:
+• "vendi 5000 pão"
+• "comprei 1000 saldo"
+• "hoje" (para ver o saldo)`);
+      return res.sendStatus(204);
+    } else {
+      await reply(from, `Preciso do teu consentimento para guardar os dados. Responde "sim" para continuar.`);
+      return res.sendStatus(204);
+    }
+  }
+
   // Rate limiting (Sprint 9)
   const rateLimit = checkRateLimit(from);
   if (!rateLimit.allowed) {
@@ -703,6 +893,8 @@ app.post("/webhook", async (req, res) => {
 
   // Command: hoje
   if (text === "hoje") {
+    await logEvent('command_used', from, { command: 'hoje' });
+
     const start = new Date();
     start.setHours(0, 0, 0, 0);
 
@@ -731,6 +923,7 @@ app.post("/webhook", async (req, res) => {
 
   // Command: /quemedeve - Who owes user
   if (text === "/quemedeve") {
+    await logEvent('command_used', from, { command: 'quemedeve' });
     const docs = await debts.find({
       user_phone: from,
       type: "recebido",
@@ -752,6 +945,7 @@ app.post("/webhook", async (req, res) => {
 
   // Command: /quemdevo - Who user owes
   if (text === "/quemdevo") {
+    await logEvent('command_used', from, { command: 'quemdevo' });
     const docs = await debts.find({
       user_phone: from,
       type: "devido",
@@ -773,6 +967,7 @@ app.post("/webhook", async (req, res) => {
 
   // Command: /kilapi - All debts
   if (text === "/kilapi") {
+    await logEvent('command_used', from, { command: 'kilapi' });
     const docs = await debts.find({
       user_phone: from,
       settled: { $ne: true }
@@ -798,6 +993,7 @@ app.post("/webhook", async (req, res) => {
   // Command: /pago - Mark debt as paid
   const pagoMatch = text.match(/^\/pago\s+(.+)/i);
   if (pagoMatch) {
+    await logEvent('command_used', from, { command: 'pago' });
     const name = pagoMatch[1].trim();
     // Escape special regex characters to prevent ReDoS attacks
     const sanitizedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -828,10 +1024,183 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(204);
   }
 
-  // Command: /stats - Admin only cache statistics
+  // Command: /stats - Admin only statistics
   if (text === "/stats" && isAdmin(from)) {
-    const stats = getCacheStats();
-    await reply(from, `📊 Cache Stats:\n• Size: ${stats.size} entries\n• Hits: ${stats.hits}\n• Misses: ${stats.misses}\n• Hit rate: ${stats.hitRate}`);
+    await logEvent('command_used', from, { command: 'stats' });
+    const stats = await getEnhancedStats();
+    const message = `📊 Contador Stats
+
+Hoje:
+• Novos usuários: ${stats.today.newUsers}
+• Usuários ativos: ${stats.today.activeUsers}
+• Mensagens: ${stats.today.totalMessages}
+• Confirmações: ${stats.today.confirmedTransactions}
+• Dívidas: ${stats.today.debtsCreated}
+
+Cache:
+• Hit rate: ${stats.cache.hitRate}
+• Entries: ${stats.cache.size}
+
+Sistema:
+• Uptime: ${stats.system.uptime}
+• MongoDB: ${stats.system.mongodb}`;
+    await reply(from, message);
+    return res.sendStatus(204);
+  }
+
+  // Command: ajuda - Show help menu
+  if (text === "ajuda" || text === "/ajuda" || text === "comandos" || text === "/comandos") {
+    await logEvent('command_used', from, { command: 'ajuda' });
+    const helpMessage = `📚 Comandos do Contador
+
+📊 SALDO:
+• hoje - Saldo do dia
+• resumo - Últimos 7 dias
+• mes - Este mês
+
+💰 DÍVIDAS:
+• /quemedeve - Quem te deve
+• /quemdevo - A quem deves
+• /kilapi - Todas as dívidas
+• /pago <nome> - Marcar como paga
+
+📝 REGISTRAR:
+• "vendi 1000 pão"
+• "comprei 500 saldo"
+• "João me deve 2000"
+• "eu devo 1000 ao Maria"
+
+🔒 PRIVACIDADE:
+• /meusdados - Ver teus dados
+• /apagar - Apagar tudo`;
+    await reply(from, helpMessage);
+    return res.sendStatus(204);
+  }
+
+  // Command: resumo - Last 7 days summary
+  if (text === "resumo" || text === "/resumo") {
+    await logEvent('command_used', from, { command: 'resumo' });
+
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const docs = await transactions.find({
+      user_phone: from,
+      date: { $gte: sevenDaysAgo }
+    }).toArray();
+
+    if (docs.length === 0) {
+      await reply(from, "Sem transações nos últimos 7 dias.");
+      return res.sendStatus(204);
+    }
+
+    let income = 0;
+    let expenses = 0;
+    const dailyBreakdown = {};
+
+    for (const doc of docs) {
+      if (doc.type === "income") {
+        income += doc.amount;
+      } else {
+        expenses += doc.amount;
+      }
+
+      // Group by day
+      const day = new Date(doc.date).toLocaleDateString('pt-AO', { weekday: 'short', day: 'numeric' });
+      if (!dailyBreakdown[day]) dailyBreakdown[day] = { income: 0, expenses: 0 };
+      if (doc.type === "income") dailyBreakdown[day].income += doc.amount;
+      else dailyBreakdown[day].expenses += doc.amount;
+    }
+
+    const balance = income - expenses;
+    const days = Object.keys(dailyBreakdown);
+
+    let message = `📊 Resumo (Últimos 7 dias)
+
+💰 Entradas: ${income.toFixed(2)} Kz
+💸 Saídas: ${expenses.toFixed(2)} Kz
+📈 Saldo: ${balance.toFixed(2)} Kz
+
+--- Por dia:`;
+
+    for (const day of days) {
+      const d = dailyBreakdown[day];
+      const dayBalance = d.income - d.expenses;
+      const signal = dayBalance >= 0 ? '+' : '';
+      message += `\n${day}: ${signal}${dayBalance.toFixed(2)} Kz`;
+    }
+
+    await reply(from, message);
+    return res.sendStatus(204);
+  }
+
+  // Command: mes - Monthly summary
+  if (text === "mes" || text === "/mes") {
+    await logEvent('command_used', from, { command: 'mes' });
+
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const docs = await transactions.find({
+      user_phone: from,
+      date: { $gte: startOfMonth }
+    }).toArray();
+
+    if (docs.length === 0) {
+      await reply(from, "Sem transações neste mês.");
+      return res.sendStatus(204);
+    }
+
+    let income = 0;
+    let expenses = 0;
+    const categories = {};
+
+    for (const doc of docs) {
+      if (doc.type === "income") {
+        income += doc.amount;
+      } else {
+        expenses += doc.amount;
+      }
+
+      // Extract category from description (first word after preposition)
+      const descLower = doc.description.toLowerCase();
+      let category = "Outros";
+      for (const prep of ['de ', 'do ', 'da ', 'dos ', 'das ', 'em ']) {
+        const idx = descLower.indexOf(prep);
+        if (idx !== -1) {
+          const start = idx + prep.length;
+          const end = descLower.indexOf(' ', start);
+          category = end !== -1 ? descLower.substring(start, end) : descLower.substring(start);
+          // Capitalize first letter
+          category = category.charAt(0).toUpperCase() + category.slice(1);
+          break;
+        }
+      }
+
+      if (!categories[category]) categories[category] = { income: 0, expenses: 0 };
+      if (doc.type === "income") categories[category].income += doc.amount;
+      else categories[category].expenses += doc.amount;
+    }
+
+    const balance = income - expenses;
+    const monthName = now.toLocaleDateString('pt-AO', { month: 'long', year: 'numeric' });
+
+    let message = `📊 ${monthName.charAt(0).toUpperCase() + monthName.slice(1)}
+
+💰 Entradas: ${income.toFixed(2)} Kz
+💸 Saídas: ${expenses.toFixed(2)} Kz
+📈 Saldo: ${balance.toFixed(2)} Kz
+
+--- Por categoria:`;
+
+    for (const cat of Object.keys(categories).sort()) {
+      const c = categories[cat];
+      const catBalance = c.income - c.expenses;
+      const signal = catBalance >= 0 ? '+' : '';
+      message += `\n${cat}: ${signal}${catBalance.toFixed(2)} Kz`;
+    }
+
+    await reply(from, message);
     return res.sendStatus(204);
   }
 
@@ -846,6 +1215,11 @@ app.post("/webhook", async (req, res) => {
           amount: Number(session.pending.amount),
           description: session.pending.description,
           date: new Date()
+        });
+        await logEvent('transaction_confirmed', from, {
+          amount: session.pending.amount,
+          type: session.pending.type,
+          description: session.pending.description
         });
       } catch (e) {
         if (e.code !== 11000) throw e;
@@ -874,6 +1248,12 @@ app.post("/webhook", async (req, res) => {
           date: new Date(),
           settled: false,
           settled_date: null
+        });
+        await logEvent('debt_created', from, {
+          amount: session.pendingDebt.amount,
+          type: session.pendingDebt.type,
+          debtor: session.pendingDebt.debtor,
+          creditor: session.pendingDebt.creditor
         });
         await reply(from, "Dívida registada.");
       } catch (e) {
@@ -918,6 +1298,12 @@ app.post("/webhook", async (req, res) => {
         date: new Date(),
         settled: false,
         settled_date: null
+      });
+      await logEvent('debt_created', from, {
+        amount: pendingDebt.amount,
+        type: pendingDebt.type,
+        debtor: pendingDebt.debtor,
+        creditor: pendingDebt.creditor
       });
       await reply(from, "Dívida registada.");
     } catch (e) {
