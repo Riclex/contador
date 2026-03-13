@@ -221,23 +221,35 @@ function parseTransactionRegex(text) {
 
   if (!amount || isNaN(amount) || amount <= 0) return { error: 'ambiguous' };
 
-  // Extract description - try multiple patterns
+  // Extract description - try multiple patterns in order
   let description = '';
 
-  // Pattern: "para X" (for transfers: "transferi 200000 para Hugo")
+  // Pattern 1: "para X" (for transfers: "transferi 200000 para Hugo")
   const paraMatch = normalized.match(/para\s+([\w\u00C0-\u00FF]+)/iu);
   if (paraMatch) {
     description = normalized.includes('minha conta') ? 'transferência para conta' : `transferência para ${paraMatch[1]}`;
   } else {
-    // Pattern: "de/do/da X" (existing logic)
+    // Pattern 2: "de/do/da X" (e.g., "vendi 1000 de fuba")
     const descMatch = normalized.match(/(?:de|do|da)\s+(.+?)(?:\b|$)/);
     if (descMatch) {
       description = descMatch[1].trim();
     } else {
-      // Pattern: "em X" (e.g., "gastei 1000 em compras", "recebi 500 em dinheiro")
+      // Pattern 3: "em X" (e.g., "gastei 1000 em compras", "recebi 500 em dinheiro")
       const emMatch = normalized.match(/em\s+(.+?)(?:\b|$)/);
       if (emMatch) {
         description = emMatch[1].trim();
+      } else {
+        // Pattern 4: "com X" (e.g., "gastei 1000 com farinha")
+        const comMatch = normalized.match(/com\s+([a-zA-Z\u00C0-\u00FF][\w\u00C0-\u00FF\s]*)(?:\s|$)/);
+        if (comMatch) {
+          description = comMatch[1].trim();
+        } else {
+          // Pattern 5: direct noun after amount (e.g., "gastei 3000 farinha")
+          const directMatch = normalized.match(/\d+\s*(?:kz|paus)?\s+([a-zA-Z\u00C0-\u00FF][\w\u00C0-\u00FF\s]*)$/i);
+          if (directMatch) {
+            description = directMatch[1].trim();
+          }
+        }
       }
     }
   }
@@ -1437,6 +1449,9 @@ async function gracefulShutdown() {
 
   process.exit(0);
 }
+
+// --- Export functions for testing
+export { parseTransactionRegex, parseDebtRegex };
 
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
