@@ -505,6 +505,9 @@ Exemplos:
 • "João me deve 2000"
 • "hoje" (vê saldo)
 
+📄 Termos: /termos
+🔒 Privacidade: /privacidade
+
 Aceitas que guardemos os teus dados para fazer os cálculos? Responde "sim" para continuar.`;
 
   await reply(userPhone, welcomeMessage);
@@ -1084,8 +1087,54 @@ Sistema:
 
 🔒 PRIVACIDADE:
 • /meusdados - Ver teus dados
-• /apagar - Apagar tudo`;
+• /apagar - Apagar tudo
+• /privacidade - Política de privacidade
+• /termos - Termos de uso`;
     await reply(from, helpMessage);
+    return res.sendStatus(204);
+  }
+
+  // Command: privacidade - Show privacy policy summary
+  if (text === "privacidade" || text === "/privacidade") {
+    await logEvent('command_used', from, { command: 'privacidade' });
+    const privacyMessage = `🔒 PRIVACIDADE
+
+O Contador guarda:
+• Teu número (com hash SHA-256)
+• Transações (vendas, gastos)
+• Dívidas (quem deve, quem deve)
+
+Base legal (Lei 22/11):
+• Consentimento explícito
+• Dados armazenados na UE (Frankfurt/Zurique)
+
+Teus direitos:
+• /meusdados - Ver teus dados
+• /apagar - Apagar tudo
+
+Política completa: github.com/contador-app/contador/PRIVACY.md`;
+    await reply(from, privacyMessage);
+    return res.sendStatus(204);
+  }
+
+  // Command: termos - Show terms of use summary
+  if (text === "termos" || text === "/termos") {
+    await logEvent('command_used', from, { command: 'termos' });
+    const termosMessage = `📄 TERMOS DE USO
+
+O Contador é um assistente financeiro via WhatsApp.
+
+Importante:
+• Serviço "como está" (sem garantias)
+• Tu és responsável pelos dados
+• Não é instituição financeira
+• Limite: 50 mensagens/dia
+
+Preço:
+• Gratuito (fase MVP)
+
+Termos completos: github.com/contador-app/contador/TERMS.md`;
+    await reply(from, termosMessage);
     return res.sendStatus(204);
   }
 

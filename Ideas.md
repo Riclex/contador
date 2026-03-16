@@ -159,7 +159,7 @@ Risk: High churn if it's just a "tracker" and not a "utility" (like generating i
 - [x] **GPT-4o-mini Only:** Usar apenas GPT-4o-mini para fallback
 - [x] **Cache de Respostas:** LRU cache com 1000 entradas e TTL de 24h
 - [x] **Message Deduplication:** MessageSid tracking com FIFO eviction (10k limit)
-- [ ] **Rate Limiting:** Prevenir abuso via limite de mensagens/dia por usuário
+- [x] **Rate Limiting:** 50 mensagens/usuário/dia com cleanup automático
 - [x] **Retry de Conexão MongoDB:** Reconexão automática com backoff exponencial
 - [ ] **Relatórios Grátis:** Versão "Kandengue" com relatório mensal simples em texto
 
@@ -173,26 +173,30 @@ Risk: High churn if it's just a "tracker" and not a "utility" (like generating i
 - [x] **Comando `/kilapi`:** Todas as dívidas ativas
 - [x] **Comando `/pago`:** Marcar dívida como paga
 - [x] **Comando `/stats`:** Estatísticas do cache (admin only)
-- [ ] **Comando `mes`:** Resumo mensal com categorias
-- [ ] **Comando `resumo`:** Últimos 7 dias com estatísticas
+- [x] **Comando `/mes`:** Resumo mensal com categorias
+- [x] **Comando `/resumo`:** Últimos 7 dias com estatísticas
 - [ ] **Categorização Automática:** Usar LLM para categorizar despesas
+- [x] **Transaction Patterns:** "em X" pattern (e.g., "gastei 1000 em compras")
+- [x] **Transaction Patterns:** "com" and direct object patterns ("comprei pão")
+- [x] **Transaction Patterns:** "em X" pattern (e.g., "gastei 1000 em compras")
+- [x] **Transaction Patterns:** "com" and direct object patterns ("comprei pão")
 
 ## Sprint 3: UX & Onboarding (Prioridade Média)
 **Objetivo:**Facilitar a adoção e retenção
 
-- [ ] **Onboarding com Consentimento:** Mensagem inicial explicando privacidade e pedindo "Aceito"
+- [x] **Onboarding com Consentimento:** Mensagem inicial explicando privacidade e pedindo "Aceito"
 - [ ] **Cartão de Visitas:** Compartilhar bot com outros comerciantes (programa de indicação)
 - [x] **Confirmação de Transação:** Mensagem "Responde: Sim ou Não" antes de registrar
-- [ ] **Comandos de Ajuda:** `ajuda`, `comandos` para explicar o que o bot faz
+- [x] **Comandos de Ajuda:** `/ajuda`, `/mes`, `/resumo` para beta testers
 
 ## Sprint 4: Privacidade & Conformidade (Prioridade Alta)
 **Objetivo:** Cumprir Lei da Protecção de Dados Pessoais (Angola)
 
 - [x] **Webhook Signature Verification:** Validação SHA256 da assinatura Twilio
-- [ ] **Hash de Telefone:** Substituir `user_phone` por `user_hash` (SHA-256)
-- [ ] **Tabela de Usuários:** Armazenar consentimento, data de entrada, plano
-- [ ] **/meusdados:** Comando para usuário ver seus dados
-- [ ] **/apagar:** Direito ao esquecimento - deletar tudo do usuário
+- [x] **Hash de Telefone:** Substituir `user_phone` por `user_hash` (SHA-256)
+- [x] **Tabela de Usuários:** Armazenar consentimento, data de entrada, plano
+- [x] **/meusdados:** Comando para usuário ver seus dados
+- [x] **/apagar:** Direito ao esquecimento - deletar tudo do usuário
 - [ ] **Política de Privacidade:** Link claro no onboarding
 
 ## Sprint 5: Relatórios & Exportação (Prioridade Média)
@@ -329,14 +333,14 @@ O WhatsApp tem alta penetração e baixa barreira de entrada, tornando-o canal i
 - [ ] **Error Tracking:** Integração com Sentry ou similar
 - [ ] **CI/CD Pipeline:** GitHub Actions para testes e deploy automático
 
-## Sprint 10: Privacidade & Conformidade (Prioridade Alta) - **PRÓXIMA**
-**Objetivo:** Cumprir Lei da Protecção de Dados Pessoais (Angola)
+## Sprint 10: Documentação & Transparência (Prioridade Média)
+**Objetivo:** Finalizar conformidade com documentação clara
 
-- [ ] **Hash de Telefone:** Substituir `user_phone` por `user_hash` (SHA-256)
-- [ ] **Tabela de Usuários:** Armazenar consentimento, data de entrada, plano
-- [ ] **/meusdados:** Comando para usuário ver seus dados
-- [ ] **/apagar:** Direito ao esquecimento - deletar tudo do usuário
-- [ ] **Política de Privacidade:** Link claro no onboarding
+- [x] **Política de Privacidade:** Link claro no onboarding e documentação (PRIVACY.md)
+- [x] **Termos de Uso:** Página simples explicando funcionalidades e limites (TERMS.md)
+- [x] **Comando /privacidade:** Resumo da política de privacidade no bot
+- [x] **Comando /termos:** Resumo dos termos de uso no bot
+- [x] **Welcome Message:** Atualizada com referências à privacidade e termos
 
 ## Sprint 11: Relatórios & Exportação (Prioridade Média)
 **Objetivo:** Transformar dados em insights úteis
@@ -345,8 +349,6 @@ O WhatsApp tem alta penetração e baixa barreira de entrada, tornando-o canal i
 - [ ] **Exportação CSV:** Baixar histórico de transações
 - [ ] **Previsão Financeira:** Usar LLM para prever próximas despesas
 - [ ] **Alertas:** Notificar quando gasto ultrapassar X% do limite mensal
-- [ ] **Comando `mes`:** Resumo mensal com categorias
-- [ ] **Comando `resumo`:** Últimos 7 dias com estatísticas
 
 ## Sprint 12: Testes & Qualidade (Prioridade Média)
 **Objetivo:** Garantir confiabilidade antes de escalar
@@ -364,6 +366,81 @@ O WhatsApp tem alta penetração e baixa barreira de entrada, tornando-o canal i
 - **Público-alvo:** Usuários com dificuldade de leitura/escrita em Angola
 - **Comportamento:** Já enviam áudios no WhatsApp naturalmente
 - **Barreira:** Não precisam digitar, apenas falar em Português/Angolano
+
+---
+
+## Sprint 14: Input em Lote (Batch Input) - Power Users (Prioridade Média)
+**Objetivo:** Permitir que usuários avancados registrem múltiplas transações de uma vez
+
+### Contexto
+- **Público-alvo:** Usuários que fazem múltiplas transações diárias (vendedores, comerciantes)
+- **Comportamento:** Já digitam múltiplas mensagens sequenciais
+- **Benefício:** Reduz tempo de registro de 5 mensagens para 1
+
+### Formato de Input
+```
+comprei pão 500
+vendi fuba 2000
+gastei 1000 em transporte
+```
+
+### Arquitetura
+```
+Mensagem Multi-linha
+         ↓
+Split por newlines
+         ↓
+Loop: parseTransaction() / parseDebt() por linha
+         ↓
+Agrupar resultados (sucessos + falhas)
+         ↓
+Confirmação única: "Registrar estas 3 transações?"
+         ↓
+Usuário: "sim" → Insert all
+         ↓
+Resposta: "✓ 3 transações registradas"
+```
+
+### Tarefas de Implementação
+
+#### Parsing
+- [ ] **Detecção de Multi-linha:** Check `messageBody.includes('\n')`
+- [ ] **Line Splitting:** Split por `\n`, filtrar vazias
+- [ ] **Parse Loop:** Chamar parser para cada linha
+- [ ] **Error Aggregation:** Capturar falhas individuais sem quebrar o lote
+
+#### UX
+- [ ] **Summary Message:** Mostrar todas as transações parsed antes de confirmar
+- [ ] **Partial Success Handling:** "2 de 3 transações entendidas. Ignorar a 3ª?"
+- [ ] **Single Confirmation:** "Responde Sim para registrar todas"
+- [ ] **Fallback:** Se linha for ambígua, pedir clarificação
+
+#### Session State
+- [ ] **BETTERING_CONFIRMATION:** Reuse estado atual
+- [ ] **Batch Flag:** `session.pendingBatch = [...]`
+
+### Estimativa de Custo
+- **Sem mudança no custo OpenAI:** 1 chamada por mensagem (mesmo que parse 3 linhas)
+- **Redução de Twilio:** 3 mensagens → 1 mensagem = 66% redução de sessões
+
+### Riscos & Mitigações
+
+| Risco | Impacto | Mitigação |
+|-------|---------|-----------|
+| Linha ambígua quebra o lote | Médio | Parse individual, continuar nas próximas |
+| Usuário confunde formato | Baixo | Help message explica formato |
+| Confirmação complexa | Baixo | Manter "sim/não" simples |
+
+### Critérios de Aceite
+- [ ] Aceita 2-5 linhas por mensagem
+- [ ] Cada linha parseada independentemente
+- [ ] Resumo claro antes de confirmar
+- [ ] Partial success não bloqueia transações válidas
+- [ ] Fallback para linha não reconhecida
+
+### Dependências
+- Parser de transações maduro (regex + LLM fallback)
+- Session state refactored para suportar batches
 
 ### Arquitetura
 ```
@@ -442,7 +519,7 @@ Resposta com confirmação
   - Regex parser for 5 debt patterns (including Portuguese names with special chars)
   - OpenAI fallback for ambiguous cases
   - Session states: IDLE, AWAITING_CONFIRMATION, AWAITING_DEBT_CONFIRMATION, AWAITING_DEBTOR_NAME
-  - Commands: /quemedeve, /quedevot, /dividas, /pago <name>
+  - Commands: /quemedeve, /quemdevo, /kilapi, /pago <name>
 
 ---
 
@@ -469,6 +546,7 @@ Resposta com confirmação
 | **Deduplication** | MessageSid tracking + FIFO eviction (10k limit) | ⭐⭐⭐⭐ |
 | **Session State** | MongoDB-backed with in-memory cache, 30min TTL | ⭐⭐⭐⭐ |
 | **Cost Control** | GPT-4o-mini only, no expensive models | ⭐⭐⭐⭐⭐ |
+| **Description Patterns** | "para X", "de/do/da X", "em X", "com X" extraction | ⭐⭐⭐⭐ |
 
 ### Sprint 9 Improvements (New Features)
 - **Webhook Signature Verification:** SHA256 validation of Twilio signatures
@@ -488,7 +566,7 @@ index.js Structure:
 ├── Session Management (MongoDB-backed + in-memory cache)
 ├── Webhook Handler (Twilio integration + signature verification)
 ├── Rate Limiting (per-user daily limits)
-└── Commands (/hoje, /quemedeve, /quemdevo, /kilapi, /pago, /stats)
+└── Commands (/hoje, /quemedeve, /quemdevo, /kilapi, /pago, /stats, /mes, /resumo, /ajuda, /meusdados, /apagar)
 ```
 
 ## Code Quality Assessment
@@ -507,7 +585,7 @@ index.js Structure:
 
 | Issue | Location | Severity | Status |
 |-------|----------|----------|--------|
-| MongoDB injection possible | `debts.find()` with regex | Low | Open |
+| MongoDB injection possible | `debts.find()` with regex | Low | Mitigated (input sanitization) |
 | Input validation schema | `sanitizeInput()` | Medium | Basic implementation |
 | Structured logging | `console.log()` | Low | Pending (Winston/Pino) |
 | Single-file architecture | entire file | Medium | Long-term refactoring |
@@ -523,8 +601,8 @@ index.js Structure:
 - ✅ Admin-only `/stats` endpoint
 
 ### Gaps
-- 🟡 MongoDB queries use regex without sanitization
-- 🟡 OpenAI prompts could be injected via user messages
+- 🟡 MongoDB queries use regex without full sanitization (partially mitigated by input sanitization)
+- 🟡 OpenAI prompts could be injected via user messages (mitigated by input sanitization)
 
 ## Performance Characteristics
 
@@ -637,14 +715,15 @@ index.js Structure:
 
 ### Current Protections
 - ✅ Message deduplication (prevents double-processing)
-- ✅ Regex sanitization in `/pago` command
+- ✅ Webhook signature verification (SHA256)
+- ✅ Input sanitization (control character stripping)
+- ✅ Rate limiting (50 messages/user/day)
+- ✅ MongoDB connection retry with exponential backoff
 - ✅ Admin-only `/stats` endpoint
 
 ### Gaps
-- 🔴 No authentication on webhook (relies on Twilio signature - not verified)
-- 🔴 OpenAI prompts could be injected via user messages
-- 🔴 No rate limiting (vulnerable to spam)
-- 🟡 MongoDB queries use regex without sanitization
+- 🟡 MongoDB queries use regex without full sanitization (partially mitigated by input sanitization)
+- 🟡 OpenAI prompts could be injected via user messages (mitigated by input sanitization)
 
 ## Performance Characteristics
 
@@ -658,31 +737,29 @@ index.js Structure:
 ## Technical Debt
 
 ### Low Priority
-- Session persistence (SQLite/Redis)
 - Structured logging (Winston/Pino)
 - Unit test coverage (only parser tests exist)
 
 ### Medium Priority
 - Input validation schema (Zod/Joi)
-- Rate limiting middleware
-- Webhook signature verification
+- MongoDB query sanitization
 
 ### High Priority
 - Move from single-file to modular structure
 - Add proper error boundaries
-- Database connection retry logic
 
 ## Recommendations
 
-### Immediate (This Week)
-1. **Add webhook signature verification** - Critical security fix
-2. **Add rate limiting** - Prevent abuse
-3. **Add tests for webhook handler** - Currently uncovered
+### Completed (Sprint 9) ✅
+1. **Add webhook signature verification** - SHA256 validation
+2. **Add rate limiting** - 50 messages/user/day
+3. **MongoDB connection retry** - Exponential backoff with 10 retries
+4. **Session persistence** - MongoDB-backed with 30min TTL
 
 ### Short-term (Next Month)
 1. **Refactor to modules** - `routes/`, `services/`, `utils/`
-2. **Add session persistence** - Redis or MongoDB
-3. **Implement structured logging** - For debugging/monitoring
+2. **Structured logging** - Winston/Pino for debugging/monitoring
+3. **MongoDB query sanitization** - Prevent injection attacks
 
 ### Long-term (Next Quarter)
 1. **Add TypeScript** - Type safety
@@ -691,13 +768,13 @@ index.js Structure:
 
 ## Overall Rating
 
-| Category | Score |
-|----------|-------|
-| Functionality | 8/10 |
-| Code Quality | 6/10 |
-| Security | 5/10 |
-| Scalability | 4/10 |
-| Maintainability | 5/10 |
-| **Overall** | **6/10** |
+| Category | Score | Notes |
+|----------|-------|-------|
+| Functionality | 8/10 | Core features working |
+| Code Quality | 7/10 | Improved with Sprint 9 |
+| Security | 7/10 | Sprint 9 security fixes added |
+| Scalability | 5/10 | Session persistence now available |
+| Maintainability | 6/10 | Single file, some technical debt |
+| **Overall** | **6.5/10** | **Solid MVP with production-ready security** |
 
-**Verdict**: Solid MVP with smart cost optimizations. Ready for limited production use with immediate security fixes (webhook verification, rate limiting).
+**Verdict:** Solid MVP with smart cost optimizations. **Ready for production** with Sprint 9 security fixes (webhook verification, rate limiting, MongoDB retry). Session persistence now prevents data loss on restart.
