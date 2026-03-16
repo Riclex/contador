@@ -1138,6 +1138,70 @@ Termos completos: github.com/contador-app/contador/TERMS.md`;
     return res.sendStatus(204);
   }
 
+  // Command: meusdados - Show user data (Lei 22/11 right to access)
+  if (text === "meusdados" || text === "/meusdados") {
+    await logEvent('command_used', from, { command: 'meusdados' });
+
+    // Get all user data
+    const userTransactions = await transactions.find({ user_phone: from }).toArray();
+    const userDebts = await debts.find({ user_phone: from }).toArray();
+    const userEvents = await events.find({ user_hash: from }).toArray();
+
+    const totalIncome = userTransactions.filter(t => t.type === "income").reduce((sum, t) => sum + t.amount, 0);
+    const totalExpenses = userTransactions.filter(t => t.type === "expense").reduce((sum, t) => sum + t.amount, 0);
+    const activeDebts = userDebts.filter(d => !d.settled).length;
+
+    const message = `📄 TEUS DADOS
+
+👤 Usuário: ${from}
+
+📊 RESUMO:
+• Transações: ${userTransactions.length}
+• Receitas: ${totalIncome.toFixed(2)} Kz
+• Despesas: ${totalExpenses.toFixed(2)} Kz
+• Saldo: ${(totalIncome - totalExpenses).toFixed(2)} Kz
+• Dívidas ativas: ${activeDebts}
+
+🔒 EVENTOS (auditoria):
+• Total: ${userEvents.length}
+
+Para apagar todos os teus dados: /apagar`;
+    await reply(from, message);
+    return res.sendStatus(204);
+  }
+
+  // Command: apagar - Delete all user data (Lei 22/11 right to be forgotten)
+  if (text === "apagar" || text === "/apagar") {
+    await logEvent('command_used', from, { command: 'apagar' });
+
+    // Check if user has data to delete
+    const userTransactions = await transactions.countDocuments({ user_phone: from });
+    const userDebts = await debts.countDocuments({ user_phone: from });
+    const userEvents = await events.countDocuments({ user_hash: from });
+
+    if (userTransactions === 0 && userDebts === 0 && userEvents === 0) {
+      await reply(from, "Não tens dados armazenados para apagar.");
+      return res.sendStatus(204);
+    }
+
+    // Ask for confirmation
+    sessions[from] = { state: "AWAITING_APAGAR_CONFIRM" };
+    await setSession(from, sessions[from]);
+
+    const message = `⚠️ CONFIRMAÇÃO
+
+Tens os seguintes dados armazenados:
+• Transações: ${userTransactions}
+• Dívidas: ${userDebts}
+• Eventos: ${userEvents}
+
+Esta ação é PERMANENTE e não pode ser desfeita.
+
+Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
+    await reply(from, message);
+    return res.sendStatus(204);
+  }
+
   // Command: resumo - Last 7 days summary
   if (text === "resumo" || text === "/resumo") {
     await logEvent('command_used', from, { command: 'resumo' });
@@ -1370,6 +1434,31 @@ Termos completos: github.com/contador-app/contador/TERMS.md`;
     } catch (e) {
       if (e.code !== 11000) throw e;
       await reply(from, "Dívida registada.");
+    }
+    sessions[from] = { state: "IDLE" };
+    await setSession(from, sessions[from]);
+    return res.sendStatus(204);
+  }
+
+  // Awaiting apagar confirmation (right to be forgotten)
+  if (session.state === "AWAITING_APAGAR_CONFIRM") {
+    if (text === "sim" || text === "yes") {
+      // Delete all user data
+      const deleteTrans = await transactions.deleteMany({ user_phone: from });
+      const deleteDebts = await debts.deleteMany({ user_phone: from });
+      const deleteEvents = await events.deleteMany({ user_hash: from });
+      const deleteSession = await db.collection('sessions').deleteOne({ user_phone: from });
+      const deleteOnboarding = await db.collection('onboarding').deleteOne({ user_phone: from });
+
+      await logEvent('data_deleted', from, {
+        transactions_deleted: deleteTrans.deletedCount,
+        debts_deleted: deleteDebts.deletedCount,
+        events_deleted: deleteEvents.deletedCount
+      });
+
+      await reply(from, "✅ Todos os teus dados foram apagados permanentemente.");
+    } else {
+      await reply(from, "Operação cancelada. Os teus dados permanecem armazenados.");
     }
     sessions[from] = { state: "IDLE" };
     await setSession(from, sessions[from]);
