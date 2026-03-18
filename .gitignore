@@ -1,0 +1,41 @@
+# Secrets & Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+server.log
+*.log
+logs/
+
+# Dependencies
+node_modules/
+
+# IDE & Editor
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Business & Planning (keep private)
+90-day-plan.md
+evaluation.md
+marketing.md
+marketing/
+LAUNCH-STATUS.md
+Ideas.md
+
+# Test files (development only)
+test-*.js
+scripts/
+
+# Build output
+dist/
+build/
