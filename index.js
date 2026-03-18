@@ -146,7 +146,9 @@ async function getEnhancedStats() {
 
 function checkRateLimit(userPhone) {
   const today = new Date().toDateString();
-  const key = `${userPhone}:${today}`;
+  // Normalize phone number for rate limiting (prevent bypass via number variation)
+  const normalizedPhone = userPhone.replace(/\D/g, ''); // Keep only digits
+  const key = `${normalizedPhone}:${today}`;
   const record = rateLimitStore.get(key) || { count: 0, resetTime: new Date(today).setDate(new Date().getDate() + 1) };
 
   if (record.count >= MAX_MESSAGES_PER_USER_PER_DAY) {
@@ -174,8 +176,14 @@ function sanitizeInput(text) {
   if (typeof text !== 'string') {
     return '';
   }
-  // Remove control characters except newline and tab
-  return text.replace(/[\x00-\x09\x0B-\x0C\x0E-\x1F\x7F]/g, '');
+  // Remove all control characters (ASCII + Unicode)
+  return text.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
+}
+
+// --- Phone Number Validation (prevent NoSQL injection)
+function isValidWhatsAppPhone(phone) {
+  // Must match format: whatsapp:+[country code][number]
+  return /^whatsapp:\+\d{7,15}$/.test(phone);
 }
 
 function parseTransactionRegex(text) {
@@ -216,7 +224,9 @@ function parseTransactionRegex(text) {
     amount = parseInt(amountMatch[1].replace(/[\s]/g, ''), 10);
   }
 
-  if (!amount || isNaN(amount) || amount <= 0) return { error: 'ambiguous' };
+  if (!amount || isNaN(amount) || amount <= 0 || amount > 1_000_000_000) {
+    return { error: 'ambiguous' };
+  }
 
   // Extract description - try multiple patterns in order
   let description = '';
@@ -835,6 +845,13 @@ app.post("/webhook", async (req, res) => {
 
   const from = req.body.From;
   const rawText = req.body.Body || "";
+
+  // Validate phone number format (prevent NoSQL injection)
+  if (!isValidWhatsAppPhone(from)) {
+    console.error(`[WEBHOOK:${reqId}] Invalid phone number format:`, from);
+    return res.status(400).send('Invalid phone number');
+  }
+
   // Input sanitization
   const text = normalize(sanitizeInput(rawText));
   const messageSid = req.body.MessageSid;
