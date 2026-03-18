@@ -37,9 +37,6 @@ function computeWebhookSignature(url, rawBody, reqId = 'none') {
   }
 
   const urlAndParams = url + sortedParams;
-  // Debug: log the exact data being signed (first 200 chars)
-  console.log(`[DEBUG:${reqId}] Signing data (first 200 chars): ${urlAndParams.substring(0, 200)}...`);
-  console.log(`[DEBUG:${reqId}] Param keys:`, sortedKeys.slice(0, 10));
   return crypto
     .createHmac('sha256', process.env.TWILIO_AUTH_TOKEN)
     .update(urlAndParams)
@@ -342,13 +339,17 @@ const responseCache = new Map();
 let cacheHits = 0;
 let cacheMisses = 0;
 
-// Admin phone numbers for /stats command - loaded from env with fallback
+// Admin phone numbers for /stats command - REQUIRED environment variable
+// Format: ADMIN_NUMBERS=whatsapp:+244912756717,whatsapp:+351936123127
 const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS
   ? process.env.ADMIN_NUMBERS.split(',').map(s => s.trim())
-  : [
-      "whatsapp:+244912756717",
-      "whatsapp:+351936123127"
-    ];
+  : [];
+
+// Validate ADMIN_NUMBERS is set at startup
+if (ADMIN_NUMBERS.length === 0) {
+  console.error('[FATAL] ADMIN_NUMBERS environment variable is required');
+  process.exit(1);
+}
 
 function isAdmin(phone) {
   return ADMIN_NUMBERS.includes(phone);
@@ -805,9 +806,7 @@ app.post("/webhook", async (req, res) => {
   // Generate request ID for tracking logs
   const reqId = Math.random().toString(36).substring(2, 8);
   req.reqId = reqId;
-  console.log(`[WEBHOOK:${reqId}] Received request, rawBody length:`, req.rawBody?.length);
-  console.log(`[WEBHOOK:${reqId}] rawBody preview:`, req.rawBody?.substring(0, 300));
-  console.log(`[WEBHOOK:${reqId}] parsed Body:`, req.body?.Body);
+  // Signature verification logged below - no raw body logging (privacy)
 
   const twilioSignature = req.headers['x-twilio-signature'];
   if (twilioSignature && process.env.TWILIO_AUTH_TOKEN) {
