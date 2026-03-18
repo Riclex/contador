@@ -501,7 +501,7 @@ async function sendWelcomeMessage(userPhone) {
 Regista vendas, gastos e kilapis só mandando mensagens.
 
 Exemplos:
-• "vendi 5000 pão"
+• "vendi 5000 de pão"
 • "João me deve 2000"
 • "hoje" (vê saldo)
 
@@ -861,8 +861,8 @@ app.post("/webhook", async (req, res) => {
       await reply(from, `Perfeito! Podes começar a usar o Contador.
 
 Experimenta mandar algo como:
-• "vendi 5000 pão"
-• "comprei 1000 saldo"
+• "vendi 5000 de pão"
+• "comprei 1000 de saldo"
 • "hoje" (para ver o saldo)`);
       return res.sendStatus(204);
     } else {
@@ -1080,8 +1080,8 @@ Sistema:
 • /pago <nome> - Marcar como paga
 
 📝 REGISTRAR:
-• "vendi 1000 pão"
-• "comprei 500 saldo"
+• "vendi 1000 de pão"
+• "comprei 500 kz de saldo"
 • "João me deve 2000"
 • "eu devo 1000 a Maria"
 
@@ -1112,7 +1112,7 @@ Teus direitos:
 • /meusdados - Ver teus dados
 • /apagar - Apagar tudo
 
-Política completa: github.com/contador-app/contador/PRIVACY.md`;
+Política completa: github.com/contador-app/contador/docs/PRIVACY.md`;
     await reply(from, privacyMessage);
     return res.sendStatus(204);
   }
@@ -1133,7 +1133,7 @@ Importante:
 Preço:
 • Gratuito (fase MVP)
 
-Termos completos: github.com/contador-app/contador/TERMS.md`;
+Termos completos: github.com/contador-app/contador/docs/TERMS.md`;
     await reply(from, termosMessage);
     return res.sendStatus(204);
   }
