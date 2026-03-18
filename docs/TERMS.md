@@ -187,7 +187,7 @@ Nada nestes Termos cria uma parceria, joint venture ou relação de emprego entr
 Para questões sobre estes Termos de Uso:
 
 - **GitHub Issues:** https://github.com/contador-app/contador/issues
-- **Email:** [inserir email de contato]
+- **Email:** rickoalex@gmail.com
 
 ---
 
