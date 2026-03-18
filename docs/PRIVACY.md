@@ -130,7 +130,7 @@ Estas transferências são necessárias para a prestação do serviço e contam 
 Para solicitações que não possam ser resolvidas via comandos, entre em contato:
 
 - **GitHub Issues:** https://github.com/contador-app/contador/issues
-- **Email:** [inserir email de contato]
+- **Email:** rickoalex@gmail.com
 
 ## 8. Alterações a Esta Política
 
