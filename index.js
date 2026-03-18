@@ -349,17 +349,12 @@ const responseCache = new Map();
 let cacheHits = 0;
 let cacheMisses = 0;
 
-// Admin phone numbers for /stats command - REQUIRED environment variable
+// Admin phone numbers for /stats command - optional environment variable
 // Format: ADMIN_NUMBERS=whatsapp:+244912756717,whatsapp:+351936123127
+// Falls back to hardcoded defaults if not set
 const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS
   ? process.env.ADMIN_NUMBERS.split(',').map(s => s.trim())
-  : [];
-
-// Validate ADMIN_NUMBERS is set at startup
-if (ADMIN_NUMBERS.length === 0) {
-  console.error('[FATAL] ADMIN_NUMBERS environment variable is required');
-  process.exit(1);
-}
+  : ['whatsapp:+244912756717', 'whatsapp:+351936123127'];
 
 function isAdmin(phone) {
   return ADMIN_NUMBERS.includes(phone);
