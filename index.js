@@ -1123,7 +1123,7 @@ Teus direitos:
 • /meusdados - Ver teus dados
 • /apagar - Apagar tudo
 
-Política completa: https://riclex.github.io/contador/docs/PRIVACY.html`;
+Política completa: https://riclex.github.io/contador/PRIVACY.html`;
     await reply(from, privacyMessage);
     return res.sendStatus(204);
   }
@@ -1144,7 +1144,7 @@ Importante:
 Preço:
 • Gratuito (fase MVP)
 
-Termos completos: https://riclex.github.io/contador/docs/TERMS.html`;
+Termos completos: https://riclex.github.io/contador/TERMS.html`;
     await reply(from, termosMessage);
     return res.sendStatus(204);
   }
