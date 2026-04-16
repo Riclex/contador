@@ -187,16 +187,18 @@ app.use(bodyParser.urlencoded({
 }));
 
 // --- Environment Validation
-const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "WEBHOOK_URL", "ADMIN_NUMBERS"];
+const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"];
 const missing = requiredEnvVars.filter((key) => !process.env[key]);
 if (missing.length > 0) {
   console.error(`Missing required environment variables: ${missing.join(", ")}`);
   process.exit(1);
 }
 
-// Admin phone numbers for /stats command - required environment variable
+// Admin phone numbers for /stats command (optional, defaults provided)
 // Format: ADMIN_NUMBERS=whatsapp:+244912756717,whatsapp:+351936123127
-const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS.split(',').map(s => s.trim());
+const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS
+  ? process.env.ADMIN_NUMBERS.split(',').map(s => s.trim())
+  : ['whatsapp:+244912756717', 'whatsapp:+351936123127'];
 
 function isAdmin(phone) {
   return ADMIN_NUMBERS.includes(phone);
@@ -839,8 +841,8 @@ app.post("/webhook", asyncHandler(async (req, res) => {
     return res.status(401).send('Missing signature');
   }
 
-  // WEBHOOK_URL is required — no fragile header-based URL reconstruction
-  const url = process.env.WEBHOOK_URL;
+  // WEBHOOK_URL preferred for reliable signature verification; falls back to header-based URL
+  const url = process.env.WEBHOOK_URL || `${req.protocol}://${req.get('host')}/webhook`;
 
   // Use Twilio's official validateRequest function
   const isValid = twilio.validateRequest(

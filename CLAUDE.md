@@ -151,8 +151,8 @@ Required:
 Optional:
 - `PORT` - Server port (default: 3000)
 - `TWILIO_WHATSAPP_NUMBER` - Default: whatsapp:+14155238886
-- `ADMIN_NUMBERS` - Comma-separated WhatsApp numbers for admin commands (overrides hardcoded values)
-- `WEBHOOK_URL` - Full URL for Twilio signature verification (e.g., `https://contador.app/webhook`)
+- `ADMIN_NUMBERS` - Comma-separated WhatsApp numbers for admin commands (defaults to `whatsapp:+244912756717,whatsapp:+351936123127`)
+- `WEBHOOK_URL` - Full URL for Twilio signature verification (e.g., `https://contador.app/webhook`); falls back to header-based URL reconstruction
 
 Admin phone numbers (from env with fallback):
 - `whatsapp:+244912756717`
