@@ -23,7 +23,7 @@
 
 <h1>Política de Privacidade - Contador</h1>
 
-<p><strong>Última atualização:</strong> 16 de Março de 2026</p>
+<p><strong>Última atualização:</strong> 15 de Abril de 2026</p>
 
 <h2>1. Introdução</h2>
 
@@ -43,7 +43,7 @@
   </thead>
   <tbody>
     <tr>
-      <td><strong>Número de telefone WhatsApp</strong> (armazenado com hash SHA-256)</td>
+      <td><strong>Número de telefone WhatsApp</strong> (armazenado exclusivamente com hash SHA-256 em todas as coleções)</td>
       <td>Identificação única do usuário</td>
       <td>Consentimento</td>
     </tr>
@@ -195,12 +195,12 @@
 <p>Implementamos as seguintes medidas técnicas e organizacionais:</p>
 
 <ul>
-  <li><strong>Pseudonimização:</strong> Números de telefone armazenados com hash SHA-256</li>
+  <li><strong>Pseudonimização:</strong> Números de telefone armazenados exclusivamente com hash SHA-256 em todas as coleções (transações, dívidas, eventos, sessões e onboarding)</li>
   <li><strong>Criptografia em trânsito:</strong> HTTPS/TLS para todas as comunicações</li>
-  <li><strong>Verificação de assinatura:</strong> Validação SHA256 de webhooks Twilio</li>
-  <li><strong>Sanitização de input:</strong> Remoção de caracteres de controle</li>
+  <li><strong>Verificação de assinatura:</strong> Validação SHA256 obrigatória de webhooks Twilio (sem caminho de bypass)</li>
+  <li><strong>Sanitização de input:</strong> Remoção de caracteres de controle, caracteres de largura zero e overrides direcionais Unicode</li>
   <li><strong>Rate limiting:</strong> 50 mensagens/usuário/dia para prevenir abuso</li>
-  <li><strong>Gestão de sessão:</strong> Sessões com TTL de 30 minutos</li>
+  <li><strong>Gestão de sessão:</strong> Sessões com TTL de 30 minutos, armazenadas com hash (nunca em texto claro)</li>
 </ul>
 
 <h2>6. Partilha de Dados</h2>

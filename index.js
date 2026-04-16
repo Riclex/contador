@@ -5,54 +5,38 @@ import { MongoClient } from "mongodb";
 import crypto from "crypto";
 import OpenAI from "openai";
 import twilio from "twilio";
+import { fileURLToPath, pathToFileURL } from "url";
+import { dirname } from "path";
+import helmet from "helmet";
+
+// --- Angola timezone helper (WAT = UTC+1, no DST)
+const ANGOLA_OFFSET_MS = 60 * 60 * 1000; // UTC+1
+
+function getAngolaMidnightUTC(date = new Date()) {
+  // Compute the UTC timestamp that corresponds to midnight in Angola
+  const angolaTime = new Date(date.getTime() + ANGOLA_OFFSET_MS);
+  return new Date(Date.UTC(
+    angolaTime.getUTCFullYear(), angolaTime.getUTCMonth(), angolaTime.getUTCDate(), 0, 0, 0
+  ) - ANGOLA_OFFSET_MS);
+}
 
 // --- Regex-based transaction parser constants
 const INCOME_VERBS = ['vendi', 'recebi', 'ganhei', 'paiei', 'biolo', 'fezada'];
 const EXPENSE_VERBS = ['comprei', 'gastei', 'paguei', 'gasto', 'pagamento', 'emprestei', 'transferi', 'enviei'];
 
-// Safe regex for amount extraction (no catastrophic backtracking)
-const AMOUNT_REGEX = /(\d[\d\s]*?)\s*(?:kz|paus)?$/i;
+// --- Command names (single source of truth for session reset logic)
+const COMMANDS = new Set([
+  'hoje', '/quemedeve', '/quemdevo', '/kilapi', '/stats',
+  'ajuda', '/ajuda', 'comandos', '/comandos',
+  'privacidade', '/privacidade', 'termos', '/termos',
+  'meusdados', '/meusdados', 'apagar', '/apagar',
+  'resumo', '/resumo', 'mes', '/mes'
+]);
 
-// --- Webhook Signature Verification
-function computeWebhookSignature(url, rawBody, reqId = 'none') {
-  if (!process.env.TWILIO_AUTH_TOKEN) return null;
-
-  // Parse raw body WITHOUT decoding - Twilio signs the exact URL-encoded string
-  const params = {};
-  for (const pair of (rawBody || '').split('&')) {
-    const [key, ...valueParts] = pair.split('=');
-    if (key) {
-      params[key] = valueParts.join('='); // Keep value exactly as-is
-    }
-  }
-
-  // Sort keys alphabetically
-  const sortedKeys = Object.keys(params).sort();
-
-  // Build signature string: url + key1value1 + key2value2 + ...
-  // Handle empty/undefined values (e.g., "key=" or "key" with no =)
-  let sortedParams = '';
-  for (const key of sortedKeys) {
-    sortedParams += `${key}${params[key] || ''}`;
-  }
-
-  const urlAndParams = url + sortedParams;
-  return crypto
-    .createHmac('sha256', process.env.TWILIO_AUTH_TOKEN)
-    .update(urlAndParams)
-    .digest('base64');
-}
-
-function verifyWebhookSignature(signature, url, rawBody) {
-  if (!signature || !process.env.TWILIO_AUTH_TOKEN) {
-    return false;
-  }
-  return signature === computeWebhookSignature(url, rawBody);
-}
-
-// --- Rate Limiting
+// --- Rate Limiting (MongoDB-backed, persists across restarts)
 const MAX_MESSAGES_PER_USER_PER_DAY = 50;
-const rateLimitStore = new Map();
+let rateLimits = null; // MongoDB collection — initialized during startup
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes (used by both app logic and MongoDB TTL index)
 
 // --- Stats Cache (5 minute TTL)
 const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -62,10 +46,8 @@ let statsCache = {
 };
 
 async function getDailyMetrics() {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
+  const today = getAngolaMidnightUTC();
+  const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
 
   // New users (first_use events today)
   const newUsers = await events.countDocuments({
@@ -116,7 +98,7 @@ async function getEnhancedStats() {
 
   const [dailyMetrics, cacheStats] = await Promise.all([
     getDailyMetrics(),
-    Promise.resolve(getCacheStats())
+    getCacheStats()
   ]);
 
   // Calculate uptime
@@ -144,40 +126,54 @@ async function getEnhancedStats() {
   return stats;
 }
 
-function checkRateLimit(userPhone) {
-  const today = new Date().toDateString();
+async function checkRateLimit(userPhone) {
+  // Use Angola timezone for day boundary so rate limit resets at Angola midnight
+  const angolaDate = new Date(Date.now() + ANGOLA_OFFSET_MS);
+  const year = angolaDate.getUTCFullYear();
+  const month = String(angolaDate.getUTCMonth() + 1).padStart(2, '0'); // 0-indexed → pad
+  const day = String(angolaDate.getUTCDate()).padStart(2, '0');
+  const today = `${year}-${month}-${day}`;
   // Normalize phone number for rate limiting (prevent bypass via number variation)
   const normalizedPhone = userPhone.replace(/\D/g, ''); // Keep only digits
   const key = `${normalizedPhone}:${today}`;
-  const record = rateLimitStore.get(key) || { count: 0, resetTime: new Date(today).setDate(new Date().getDate() + 1) };
+  const resetAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h from now
 
-  if (record.count >= MAX_MESSAGES_PER_USER_PER_DAY) {
-    return { allowed: false, remaining: 0, resetTime: record.resetTime };
+  const doc = await rateLimits.findOneAndUpdate(
+    { _id: key },
+    { $inc: { count: 1 }, $setOnInsert: { resetAt } },
+    { upsert: true, returnDocument: 'after' }
+  );
+
+  // Cap count at limit + 1 to prevent unbounded growth from attackers
+  if (doc.count > MAX_MESSAGES_PER_USER_PER_DAY + 1) {
+    await rateLimits.updateOne({ _id: key }, { $set: { count: MAX_MESSAGES_PER_USER_PER_DAY + 1 } });
+    doc.count = MAX_MESSAGES_PER_USER_PER_DAY + 1;
   }
 
-  record.count++;
-  rateLimitStore.set(key, record);
-
-  return { allowed: true, remaining: MAX_MESSAGES_PER_USER_PER_DAY - record.count, resetTime: record.resetTime };
-}
-
-// Clean up old rate limit entries
-setInterval(() => {
-  const now = new Date();
-  for (const [key, record] of rateLimitStore.entries()) {
-    if (now.getTime() > record.resetTime) {
-      rateLimitStore.delete(key);
+  if (doc.count > MAX_MESSAGES_PER_USER_PER_DAY) {
+    // Only send the rate limit message once per day (avoid burning Twilio credits)
+    if (!doc.notified) {
+      await rateLimits.updateOne({ _id: key }, { $set: { notified: true } });
+      return { allowed: false, remaining: 0, resetTime: doc.resetAt.getTime(), sendNotice: true };
     }
+    return { allowed: false, remaining: 0, resetTime: doc.resetAt.getTime(), sendNotice: false };
   }
-}, 60000); // Check every minute
+
+  return { allowed: true, remaining: MAX_MESSAGES_PER_USER_PER_DAY - doc.count, resetTime: doc.resetAt.getTime() };
+}
 
 // --- Input Sanitization
 function sanitizeInput(text) {
   if (typeof text !== 'string') {
     return '';
   }
-  // Remove all control characters (ASCII + Unicode)
-  return text.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
+  // Remove all control characters (ASCII + Unicode) and zero-width/format characters
+  return text.replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200D\uFEFF\u202A-\u202E\u2066-\u2069]/g, '');
+}
+
+// --- Text normalization (used by parsers)
+function normalize(text) {
+  return text.toLowerCase().trim();
 }
 
 // --- Phone Number Validation (prevent NoSQL injection)
@@ -186,8 +182,23 @@ function isValidWhatsAppPhone(phone) {
   return /^whatsapp:\+\d{7,15}$/.test(phone);
 }
 
+// --- Phone Number Hashing (for privacy-compliant event storage)
+function hashPhone(phone) {
+  // 16 hex chars = 64 bits. Birthday paradox collision at ~2^32 users.
+  // For MVP scale this is safe. Increase to 32 chars (128 bits) before scaling.
+  return crypto.createHash('sha256').update(phone).digest('hex').substring(0, 16);
+}
+
+// --- Sanitize user input before embedding in OpenAI prompt (prevent injection, limit length)
+const MAX_OPENAI_INPUT_LENGTH = 500;
+function sanitizeForPrompt(text) {
+  let sanitized = text.length > MAX_OPENAI_INPUT_LENGTH ? text.substring(0, MAX_OPENAI_INPUT_LENGTH) : text;
+  sanitized = sanitized.replace(/"/g, '\\"').replace(/\n/g, ' ');
+  return sanitized;
+}
+
 function parseTransactionRegex(text) {
-  const normalized = text.toLowerCase().trim();
+  const normalized = normalize(text);
 
   // Detect type by verbs
   let type = null;
@@ -199,8 +210,8 @@ function parseTransactionRegex(text) {
     }
   }
 
-  // Special case: "enviei para a minha conta" = income (money coming into user's account)
-  if (normalized.includes('enviei') && normalized.includes('minha conta')) {
+  // Special case: transfers to own account = income (money arriving in user's account)
+  if ((normalized.includes('enviei') || normalized.includes('transferi')) && normalized.includes('minha conta')) {
     type = 'income';
   }
 
@@ -215,13 +226,15 @@ function parseTransactionRegex(text) {
 
   if (!type) return { error: 'ambiguous' };
 
-  // Extract amount (number, optionally followed by Kz or paus)
-  // Pattern: digits with optional spaces, optionally followed by Kz/paus
-  // Use non-greedy match that stops before a word boundary followed by letters
-  const amountMatch = normalized.match(/(\d+(?:[\s]\d+)*)\s*(?:kz|paus)?/i);
+  // Extract amount — prioritize currency-annotated amounts (e.g., "5000 kz") over bare numbers
+  // NOTE: [\s]\d+ in the regex allows space-separated thousands ("200 000" → 200000) but may
+  // over-match when a number is followed by an unrelated word starting with digits. The currency
+  // suffix (kz/paus) anchor prevents most false positives for the first pattern.
+  const currencyMatch = normalized.match(/(\d+(?:[\s]\d+)*)\s*(?:kz|paus)/i);
+  const amountMatch = currencyMatch || normalized.match(/(\d+(?:[\s]\d+)*)/i);
   let amount = null;
   if (amountMatch) {
-    amount = parseInt(amountMatch[1].replace(/[\s]/g, ''), 10);
+    amount = parseFloat(amountMatch[1].replace(/[\s]/g, ''));
   }
 
   if (!amount || isNaN(amount) || amount <= 0 || amount > 1_000_000_000) {
@@ -232,17 +245,17 @@ function parseTransactionRegex(text) {
   let description = '';
 
   // Pattern 1: "para X" (for transfers: "transferi 200000 para Hugo")
-  const paraMatch = normalized.match(/para\s+([\w\u00C0-\u00FF]+)/iu);
+  const paraMatch = normalized.match(/para\s+([\w\u00C0-\u00FF]+(?:\s+[\w\u00C0-\u00FF]+)*)/iu);
   if (paraMatch) {
     description = normalized.includes('minha conta') ? 'transferência para conta' : `transferência para ${paraMatch[1]}`;
   } else {
-    // Pattern 2: "de/do/da X" (e.g., "vendi 1000 de fuba")
-    const descMatch = normalized.match(/(?:de|do|da)\s+(.+?)(?:\b|$)/);
+    // Pattern 2: "de/do/da X" (e.g., "vendi 1000 de pao de trigo" → "pao de trigo")
+    const descMatch = normalized.match(/\b(?:de|do|da|dos|das)\s+(.+)$/);
     if (descMatch) {
       description = descMatch[1].trim();
     } else {
       // Pattern 3: "em X" (e.g., "gastei 1000 em compras", "recebi 500 em dinheiro")
-      const emMatch = normalized.match(/em\s+(.+?)(?:\b|$)/);
+      const emMatch = normalized.match(/em\s+(.+)$/);
       if (emMatch) {
         description = emMatch[1].trim();
       } else {
@@ -265,73 +278,76 @@ function parseTransactionRegex(text) {
 }
 
 // --- Regex-based debt parser constants
-const DEBT_VERBS_RECEBIDO = ['me deve', 'me deve', 'deve-me'];
+const DEBT_VERBS_RECEBIDO = ['me deve', 'deve-me'];
 const DEBT_VERBS_DEVIDO = ['eu devo', 'devo', 'emprestei a'];
 
 function parseDebtRegex(text) {
-  const normalized = text.toLowerCase().trim();
+  const normalized = normalize(text);
+
+  // Helper to parse amounts with space-separated thousands (e.g., "200 000" → 200000)
+  const parseAmount = (str) => parseFloat(str.replace(/[\s]/g, ''));
 
   // Pattern 1: "O João me deve 2000kz" or "João me deve 2000kz" - Someone owes user
-  const pattern1 = /(?:o\s+)?([\w\u00C0-\u00FF]+)\s+me\s+deve\s+(\d+)\s*(kz)?/iu;
+  const pattern1 = /(?:o\s+)?([\w\u00C0-\u00FF]+)\s+me\s+deve\s+(\d+(?:[\s]\d+)*)\s*(kz)?/iu;
   const match1 = normalized.match(pattern1);
   if (match1) {
     return {
       type: "recebido",
       creditor: "user",
       debtor: match1[1],
-      amount: parseInt(match1[2]),
+      amount: parseAmount(match1[2]),
       description: `O ${match1[1]} me deve`
     };
   }
 
   // Pattern 2: "Me deve 2000 ao João" - Someone owes user (name after 'ao' or 'a')
-  const pattern2 = /me\s+deve\s+(\d+)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
+  const pattern2 = /me\s+deve\s+(\d+(?:[\s]\d+)*)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
   const match2 = normalized.match(pattern2);
   if (match2) {
     return {
       type: "recebido",
       creditor: "user",
       debtor: match2[3],
-      amount: parseInt(match2[1]),
+      amount: parseAmount(match2[1]),
       description: `Me deve ${match2[1]}`
     };
   }
 
   // Pattern 3: "Eu devo 1500 a Maria" - User owes someone (name after 'ao' or 'a')
-  const pattern3 = /eu\s+devo\s+(\d+)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
+  const pattern3 = /eu\s+devo\s+(\d+(?:[\s]\d+)*)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
   const match3 = normalized.match(pattern3);
   if (match3) {
     return {
       type: "devido",
       creditor: match3[3],
       debtor: "user",
-      amount: parseInt(match3[1]),
+      amount: parseAmount(match3[1]),
       description: `Eu devo ${match3[1]}`
     };
   }
 
   // Pattern 4: "Devo 1500 a Maria" - User owes someone (name after 'ao' or 'a')
-  const pattern4 = /devo\s+(\d+)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
+  const pattern4 = /devo\s+(\d+(?:[\s]\d+)*)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
   const match4 = normalized.match(pattern4);
   if (match4) {
     return {
       type: "devido",
       creditor: match4[3],
       debtor: "user",
-      amount: parseInt(match4[1]),
+      amount: parseAmount(match4[1]),
       description: `Devo ${match4[1]}`
     };
   }
 
   // Pattern 5: "Emprestei 500 ao João" - User lent money (expects return)
-  const pattern5 = /emprestei\s+(\d+)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
+  const pattern5 = /emprestei\s+(\d+(?:[\s]\d+)*)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
   const match5 = normalized.match(pattern5);
   if (match5) {
     return {
       type: "recebido",
       creditor: "user",
       debtor: match5[3],
-      amount: parseInt(match5[1]),
+      amount: parseAmount(match5[1]),
       description: `Emprestei ${match5[1]}`
     };
   }
@@ -339,15 +355,33 @@ function parseDebtRegex(text) {
   return { error: 'ambiguous' };
 }
 
+// --- Message Deduplication
+// NOTE: In-memory Set — resets on server restart. Duplicate inserts are caught by MongoDB
+// unique indexes on message_sid (error code 11000 silently ignored), so this is a performance
+// optimization (avoids a MongoDB round-trip for retried webhooks), not a correctness requirement.
+// For horizontal scaling, this would need to move to a shared store (Redis or MongoDB).
 const MAX_PROCESSED_MESSAGES = 10000;
 const processedMessages = new Set();
 
 // --- Response Cache
+// NOTE: In-memory LRU Map — resets on server restart, causing cold cache (extra OpenAI calls
+// until cache warms up). This is a performance optimization only; no correctness impact.
+// For horizontal scaling, this would need to move to a shared store (Redis or MongoDB).
 const CACHE_SIZE = 1000;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const responseCache = new Map();
 let cacheHits = 0;
 let cacheMisses = 0;
+
+function getCacheStats() {
+  const total = cacheHits + cacheMisses;
+  return {
+    size: responseCache.size,
+    hits: cacheHits,
+    misses: cacheMisses,
+    hitRate: total > 0 ? ((cacheHits / total) * 100).toFixed(1) + '%' : '0%'
+  };
+}
 
 // Admin phone numbers for /stats command - optional environment variable
 // Format: ADMIN_NUMBERS=whatsapp:+244912756717,whatsapp:+351936123127
@@ -369,6 +403,9 @@ function getCachedResponse(text, type) {
   const entry = responseCache.get(key);
   if (entry && Date.now() - entry.timestamp < CACHE_TTL_MS) {
     cacheHits++;
+    // Move to end for true LRU behavior
+    responseCache.delete(key);
+    responseCache.set(key, entry);
     return entry.data;
   }
   // Remove expired entry
@@ -390,11 +427,20 @@ function setCachedResponse(text, type, data) {
   });
 }
 
+// --- Main module guard — server only starts when index.js is run directly, not when imported by tests
+const __filename = fileURLToPath(import.meta.url);
+const isMainModule = pathToFileURL(process.argv[1] || '').href === import.meta.url;
+
 const app = express();
+app.use(helmet()); // Security headers (CSP, X-Frame-Options, etc.)
+
+if (isMainModule) {
+app.set('trust proxy', 1); // Trust Railway/reverse proxy headers for signature verification
 
 // body-parser with raw body capture for Twilio signature verification
 app.use(bodyParser.urlencoded({
   extended: false,
+  limit: '10kb',
   verify: (req, res, buf) => {
     req.rawBody = buf.toString('utf8');
   }
@@ -432,37 +478,78 @@ async function connectWithRetry() {
       await new Promise(resolve => setTimeout(resolve, backoff));
     }
   }
-  console.error("Failed to connect to MongoDB after max retries");
-  process.exit(1);
+  // After fast retries exhausted, switch to slow indefinite retry
+  console.error("Failed to connect to MongoDB after fast retries. Switching to slow retry (60s interval)...");
+  while (true) {
+    await new Promise(resolve => setTimeout(resolve, 60000));
+    try {
+      await mongo.connect();
+      mongoConnected = true;
+      mongoRetryCount = 0;
+      console.log("Connected to MongoDB (slow retry)");
+      return;
+    } catch (err) {
+      console.error(`MongoDB slow retry failed: ${err.message}`);
+    }
+  }
 }
 
 await connectWithRetry();
 
 // Monitor connection health
+let reconnectInProgress = false;
 mongo.on('close', () => {
   mongoConnected = false;
   console.warn('MongoDB connection closed. Attempting reconnection...');
-  connectWithRetry();
+  // Prevent concurrent reconnection attempts
+  if (!reconnectInProgress) {
+    reconnectInProgress = true;
+    connectWithRetry().then(() => {
+      // Clear potentially stale in-memory session cache after reconnect
+      for (const key of Object.keys(sessions)) {
+        delete sessions[key];
+      }
+    }).finally(() => { reconnectInProgress = false; });
+  }
 });
 
 const db = mongo.db();
 const transactions = db.collection("transactions");
 const debts = db.collection("debts");
 const events = db.collection("events");
+rateLimits = db.collection("rate_limits");
+
+// Rate limit TTL index — expired entries auto-deleted by MongoDB
+try { await rateLimits.createIndex({ resetAt: 1 }, { expireAfterSeconds: 0 }); } catch (err) { if (err.code !== 86) throw err; }
 
 // --- Event Tracking System
-events.createIndex({ event_name: 1, timestamp: -1 });
-events.createIndex({ user_hash: 1, timestamp: -1 });
+try { await events.createIndex({ event_name: 1, timestamp: -1 }); } catch (err) { if (err.code !== 86) throw err; }
+try { await events.createIndex({ user_hash: 1, timestamp: -1 }); } catch (err) { if (err.code !== 86) throw err; }
+// Audit retention: auto-delete data_deleted records after 2 years (Lei 22/11 compliance)
+try {
+  await events.createIndex(
+    { timestamp: 1 },
+    { expireAfterSeconds: 2 * 365 * 24 * 60 * 60, partialFilterExpression: { event_name: 'data_deleted' } }
+  );
+} catch (err) { if (err.code !== 86) throw err; }
+
+// --- Migration Guard — prevent redundant migrations on every startup
+async function isMigrationDone(name) {
+  const doc = await db.collection('_migrations').findOne({ _id: name });
+  return doc !== null;
+}
+
+async function markMigrationDone(name) {
+  await db.collection('_migrations').insertOne({ _id: name, timestamp: new Date() });
+}
 
 async function logEvent(eventName, userPhone, metadata = {}) {
   try {
-    // Create hash of phone for privacy
-    const userHash = crypto.createHash('sha256').update(userPhone).digest('hex').substring(0, 16);
+    const userHash = hashPhone(userPhone);
 
     const eventDoc = {
       event_name: eventName,
       user_hash: userHash,
-      user_phone: userPhone, // Keep raw for internal use, could be removed for stricter privacy
       timestamp: new Date(),
       metadata: metadata
     };
@@ -476,7 +563,7 @@ async function logEvent(eventName, userPhone, metadata = {}) {
       event: eventName,
       user_hash: userHash,
       timestamp: new Date().toISOString(),
-      ...metadata
+      metadata
     }));
   } catch (err) {
     // Fail silently - don't break user experience if logging fails
@@ -489,13 +576,15 @@ const ONBOARDING_STATE_KEY = 'onboarding_state';
 
 async function isNewUser(userPhone) {
   // Check if user has any previous transactions or events
-  const userEvents = await events.findOne({ user_phone: userPhone });
+  const userHash = hashPhone(userPhone);
+  const userEvents = await events.findOne({ user_hash: userHash });
   return !userEvents;
 }
 
 async function hasGivenConsent(userPhone) {
+  const userHash = hashPhone(userPhone);
   const userEvents = await events.findOne({
-    user_phone: userPhone,
+    user_hash: userHash,
     event_name: 'consent_given'
   });
   return !!userEvents;
@@ -520,35 +609,125 @@ Aceitas que guardemos os teus dados para fazer os cálculos? Responde "sim" para
 }
 
 async function setOnboardingState(userPhone, state) {
+  const userHash = hashPhone(userPhone);
   await db.collection('onboarding').updateOne(
-    { user_phone: userPhone },
+    { user_hash: userHash },
     { $set: { state, updated_at: new Date() } },
     { upsert: true }
   );
 }
 
 async function getOnboardingState(userPhone) {
-  const doc = await db.collection('onboarding').findOne({ user_phone: userPhone });
+  const userHash = hashPhone(userPhone);
+  const doc = await db.collection('onboarding').findOne({ user_hash: userHash });
   return doc?.state || 'completed';
 }
 
-// Create indexes on debts collection
-await debts.createIndex({ user_phone: 1, settled: 1 });
-await debts.createIndex({ user_phone: 1, creditor: 1, debtor: 1 });
+// Create indexes on debts collection (user_hash replaces user_phone for privacy)
+try { await debts.createIndex({ user_hash: 1, settled: 1 }); } catch (err) { if (err.code !== 86) throw err; }
+try { await debts.createIndex({ user_hash: 1, creditor: 1, debtor: 1 }); } catch (err) { if (err.code !== 86) throw err; }
+try { await debts.createIndex({ user_hash: 1, creditor_lower: 1 }); } catch (err) { if (err.code !== 86) throw err; }
+try { await debts.createIndex({ user_hash: 1, debtor_lower: 1 }); } catch (err) { if (err.code !== 86) throw err; }
 try {
   await debts.createIndex({ message_sid: 1 }, { unique: true });
 } catch (err) {
-  // Index already exists (IndexKeySpecsConflict code: 86)
   if (err.code !== 86) throw err;
 }
 
-// Create indexes on transactions collection
-await transactions.createIndex({ user_phone: 1, date: -1 });
+// Create indexes on transactions collection (user_hash replaces user_phone for privacy)
+try { await transactions.createIndex({ user_hash: 1, date: -1 }); } catch (err) { if (err.code !== 86) throw err; }
 try {
   await transactions.createIndex({ message_sid: 1 }, { unique: true });
 } catch (err) {
-  // Index already exists (IndexKeySpecsConflict code: 86)
   if (err.code !== 86) throw err;
+}
+
+// Migrate existing records: backfill user_hash from user_phone
+try {
+  if (!(await isMigrationDone('backfill_user_hash'))) {
+  const migrateCollection = async (collection) => {
+    const docs = await collection.find({ user_phone: { $exists: true }, user_hash: { $exists: false } }).toArray();
+    if (docs.length > 0) {
+      console.log(`[MIGRATE] Backfilling user_hash for ${docs.length} ${collection.collectionName} records...`);
+      for (const doc of docs) {
+        await collection.updateOne(
+          { _id: doc._id },
+          { $set: { user_hash: hashPhone(doc.user_phone) } }
+        );
+      }
+      console.log(`[MIGRATE] ${collection.collectionName} migration complete.`);
+    }
+  };
+  await migrateCollection(transactions);
+  await migrateCollection(debts);
+  await migrateCollection(db.collection('onboarding'));
+  await migrateCollection(db.collection('sessions'));
+
+  // Remove raw phone numbers from documents now that user_hash is backfilled
+  const removeUserPhone = async (collection) => {
+    const result = await collection.updateMany(
+      { user_phone: { $exists: true }, user_hash: { $exists: true } },
+      { $unset: { user_phone: "" } }
+    );
+    if (result.modifiedCount > 0) {
+      console.log(`[MIGRATE] Removed user_phone from ${result.modifiedCount} ${collection.collectionName} records.`);
+    }
+  };
+  await removeUserPhone(transactions);
+  await removeUserPhone(debts);
+  await removeUserPhone(db.collection('onboarding'));
+  await removeUserPhone(db.collection('sessions'));
+
+  // Backfill creditor_lower/debtor_lower for existing debt records (index-friendly queries)
+  const debtsNoLower = await debts.find({
+    $or: [
+      { creditor_lower: { $exists: false } },
+      { debtor_lower: { $exists: false } }
+    ]
+  }).toArray();
+  if (debtsNoLower.length > 0) {
+    console.log(`[MIGRATE] Backfilling creditor_lower/debtor_lower for ${debtsNoLower.length} debt records...`);
+    for (const doc of debtsNoLower) {
+      const update = {};
+      if (doc.creditor && !doc.creditor_lower) update.creditor_lower = doc.creditor.toLowerCase();
+      if (doc.debtor && !doc.debtor_lower) update.debtor_lower = doc.debtor.toLowerCase();
+      if (Object.keys(update).length > 0) {
+        await debts.updateOne({ _id: doc._id }, { $set: update });
+      }
+    }
+    console.log('[MIGRATE] Debt normalized fields migration complete.');
+  }
+  await markMigrationDone('backfill_user_hash');
+  } else {
+    console.log('[MIGRATE] Skipping backfill_user_hash — already done');
+  }
+} catch (err) {
+  console.error('[MIGRATE] Migration error (non-fatal):', err.message);
+}
+
+// Create indexes on sessions collection (phone_hash replaces phone for privacy)
+try {
+  await db.collection('sessions').createIndex({ phone_hash: 1 }, { unique: true });
+} catch (err) {
+  if (err.code !== 86) throw err;
+}
+try {
+  await db.collection('sessions').createIndex({ updatedAt: 1 }, { expireAfterSeconds: SESSION_TTL_MS / 1000 });
+} catch (err) {
+  // 86 = index spec conflict, 67 = immutable option (e.g., changed TTL on existing index)
+  if (err.code !== 86 && err.code !== 67) throw err;
+  console.warn(`[DB] sessions TTL index already exists (code ${err.code}), skipping`);
+}
+
+// Pre-populate dedup set from recent records (catches Twilio retries after restart)
+try {
+  const recentTxSids = await transactions.find({}, { projection: { message_sid: 1 } }).sort({ date: -1 }).limit(MAX_PROCESSED_MESSAGES).toArray();
+  recentTxSids.forEach(doc => processedMessages.add(doc.message_sid));
+  const recentDebtSids = await debts.find({}, { projection: { message_sid: 1 } }).sort({ date: -1 }).limit(MAX_PROCESSED_MESSAGES).toArray();
+  recentDebtSids.forEach(doc => processedMessages.add(doc.message_sid));
+  console.log(`[DB] Pre-populated dedup set with ${processedMessages.size} recent MessageSids`);
+} catch (err) {
+  console.error('[DB] Dedup set pre-population failed (non-fatal):', err.message);
 }
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -558,9 +737,13 @@ const twilioClient = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
+const OPENAI_TIMEOUT_MS = 10000; // 10 second timeout
+let openaiHealthy = true; // Track OpenAI connectivity for health check
+
 async function parseDebtOpenAI(text) {
   try {
-    const response = await openai.chat.completions.create({
+    let timeoutId;
+    const openaiPromise = openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0,
     response_format: { type: "json_object" },
@@ -611,12 +794,35 @@ async function parseDebtOpenAI(text) {
       },
       {
         role: "user",
-        content: `Extrai uma dívida desta frase:\n"${text}"`
+        content: `Extrai uma dívida desta frase:\n"${sanitizeForPrompt(text)}"`
       }
     ]
   });
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error('OpenAI timeout')), OPENAI_TIMEOUT_MS);
+    });
 
-    return JSON.parse(response.choices[0].message.content);
+    let response;
+    try {
+      response = await Promise.race([openaiPromise, timeoutPromise]);
+      clearTimeout(timeoutId);
+      openaiHealthy = true;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      openaiPromise.catch(() => {}); // Neutralize losing promise rejection
+      openaiHealthy = false;
+      console.error('OpenAI debt parsing error:', error.message);
+      return { error: 'service_unavailable', message: 'Failed to parse debt' };
+    }
+
+    const parsed = JSON.parse(response.choices[0].message.content);
+    // Validate OpenAI response has required debt fields
+    if (parsed.error) return parsed;
+    if (!parsed.type || !parsed.creditor || !parsed.debtor || typeof parsed.amount !== 'number') {
+      console.error('[OpenAI] Malformed debt response:', JSON.stringify(parsed));
+      return { error: 'ambiguous' };
+    }
+    return parsed;
   } catch (error) {
     console.error('OpenAI debt parsing error:', error.message);
     return { error: 'service_unavailable', message: 'Failed to parse debt' };
@@ -641,65 +847,60 @@ async function parseDebt(text) {
   // Fallback to OpenAI for ambiguous cases
   console.log('Cache miss - calling OpenAI for debt');
   const result = await parseDebtOpenAI(text);
-  setCachedResponse(text, 'debt', result);
+  if (!result.error) {
+    setCachedResponse(text, 'debt', result);
+  }
   return result;
 }
 
 // --- Session Management (MongoDB-based persistence)
-// State types: IDLE, AWAITING_CONFIRMATION, AWAITING_DEBT_CONFIRMATION, AWAITING_DEBTOR_NAME
-const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
+// State types: IDLE, AWAITING_CONFIRMATION, AWAITING_DEBT_CONFIRMATION, AWAITING_DEBTOR_NAME, AWAITING_PAGO_CONFIRM, AWAITING_APAGAR_CONFIRM
 
 async function getSession(phone) {
   if (!mongoConnected) return null;
 
-  const doc = await db.collection('sessions').findOne({ phone });
+  const phoneHash = hashPhone(phone);
+  const doc = await db.collection('sessions').findOne({ phone_hash: phoneHash });
   if (!doc) return null;
 
-  // Check if session has expired
+  // Check if session has expired (based on last state change, not last read)
   if (Date.now() - doc.updatedAt > SESSION_TTL_MS) {
-    await db.collection('sessions').deleteOne({ phone });
+    await db.collection('sessions').deleteOne({ phone_hash: phoneHash });
     return null;
   }
-
-  // Update last activity time
-  await db.collection('sessions').updateOne(
-    { phone },
-    { $set: { updatedAt: new Date() } }
-  );
 
   return doc;
 }
 
 async function setSession(phone, sessionData) {
+  const phoneHash = hashPhone(phone);
   if (!mongoConnected) {
     // Fallback to in-memory if MongoDB is not connected
-    sessions[phone] = { ...sessionData, updatedAt: Date.now() };
+    sessions[phoneHash] = { ...sessionData, updatedAt: Date.now() };
     return;
   }
 
   await db.collection('sessions').updateOne(
-    { phone },
-    { $set: { ...sessionData, phone, updatedAt: new Date() } },
+    { phone_hash: phoneHash },
+    { $set: { ...sessionData, phone_hash: phoneHash, updatedAt: new Date() } },
     { upsert: true }
   );
 }
 
 async function deleteSession(phone) {
+  const phoneHash = hashPhone(phone);
   if (!mongoConnected) {
-    delete sessions[phone];
+    delete sessions[phoneHash];
     return;
   }
 
-  await db.collection('sessions').deleteOne({ phone });
+  await db.collection('sessions').deleteOne({ phone_hash: phoneHash });
 }
 
 // Keep in-memory fallback for speed
 const sessions = {};
 
 // --- Helpers
-function normalize(text) {
-  return text.toLowerCase().trim();
-}
 
 async function parseTransaction(text) {
   // Check cache first
@@ -719,7 +920,8 @@ async function parseTransaction(text) {
   // Fallback to OpenAI for ambiguous cases
   console.log('Cache miss - calling OpenAI for transaction');
   try {
-    const response = await openai.chat.completions.create({
+    let timeoutId;
+    const openaiPromise = openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
       response_format: { type: "json_object" },
@@ -750,7 +952,7 @@ async function parseTransaction(text) {
             - OR transaction type cannot be determined. \
             5. Output: \
             - Output ONLY valid JSON. \
-            - No explanatations. \
+            - No explanations. \
             - No extra keys. \
             Examples: \
             Input: 'Gastei 1500 Kz de saldo'\
@@ -781,13 +983,36 @@ async function parseTransaction(text) {
         },
         {
           role: "user",
-          content: `Extrai uma transação financeira desta frase:\n"${text}"`
+          content: `Extrai uma transação financeira desta frase:\n"${sanitizeForPrompt(text)}"`
         }
       ]
     });
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error('OpenAI timeout')), OPENAI_TIMEOUT_MS);
+    });
+
+    let response;
+    try {
+      response = await Promise.race([openaiPromise, timeoutPromise]);
+      clearTimeout(timeoutId);
+      openaiHealthy = true;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      openaiPromise.catch(() => {}); // Neutralize losing promise rejection
+      openaiHealthy = false;
+      console.error('OpenAI API error in parseTransaction:', error.message);
+      return { error: 'service_unavailable', message: 'Failed to parse transaction' };
+    }
 
     const result = JSON.parse(response.choices[0].message.content);
-    setCachedResponse(text, 'transaction', result);
+    // Validate OpenAI response has required transaction fields
+    if (!result.error && (!result.type || typeof result.amount !== 'number')) {
+      console.error('[OpenAI] Malformed transaction response:', JSON.stringify(result));
+      return { error: 'ambiguous' };
+    }
+    if (!result.error) {
+      setCachedResponse(text, 'transaction', result);
+    }
     return result;
   } catch (error) {
     console.error('OpenAI API error in parseTransaction:', error.message);
@@ -798,15 +1023,53 @@ async function parseTransaction(text) {
 const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER || "whatsapp:+14155238886";
 
 async function reply(to, body) {
-  await twilioClient.messages.create({
-    from: TWILIO_WHATSAPP_NUMBER,
-    to,
-    body
-  });
+  try {
+    await twilioClient.messages.create({
+      from: TWILIO_WHATSAPP_NUMBER,
+      to,
+      body
+    });
+  } catch (err) {
+    console.error('Failed to send WhatsApp message:', err.message);
+  }
+}
+
+// Retry wrapper for critical confirmations (after DB writes where user must know the outcome)
+async function replyWithRetry(to, body, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      await twilioClient.messages.create({
+        from: TWILIO_WHATSAPP_NUMBER,
+        to,
+        body
+      });
+      return;
+    } catch (err) {
+      if (attempt < retries) {
+        console.warn(`[REPLY] Retry ${attempt + 1} for ${to}:`, err.message);
+        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+      } else {
+        console.error(`[REPLY] All ${retries + 1} attempts failed for ${to}:`, err.message);
+      }
+    }
+  }
 }
 
 // --- Routes
-app.post("/webhook", async (req, res) => {
+// Wrap async handlers to forward rejected promises to Express error handler
+const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+app.post("/webhook", asyncHandler(async (req, res) => {
+  // Webhook timeout — Twilio times out at ~15s; fail fast if we can't respond in time
+  const WEBHOOK_TIMEOUT_MS = 12000;
+  const webhookTimeout = setTimeout(() => {
+    if (!res.headersSent) {
+      console.error('[WEBHOOK] Request timed out after 12s');
+      res.status(504).send('Gateway Timeout');
+    }
+  }, WEBHOOK_TIMEOUT_MS);
+  res.on('finish', () => clearTimeout(webhookTimeout));
+
   // Webhook Signature Verification (Sprint 9 - Security)
   // Generate request ID for tracking logs
   const reqId = Math.random().toString(36).substring(2, 8);
@@ -814,32 +1077,37 @@ app.post("/webhook", async (req, res) => {
   // Signature verification logged below - no raw body logging (privacy)
 
   const twilioSignature = req.headers['x-twilio-signature'];
-  if (twilioSignature && process.env.TWILIO_AUTH_TOKEN) {
-    // Support Railway/reverse proxy forwarded headers
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    const host = req.headers['x-forwarded-host'] || req.get('host');
-    const url = `${protocol}://${host}/webhook`;
-
-    // Use Twilio's official validateRequest function
-    const isValid = twilio.validateRequest(
-      process.env.TWILIO_AUTH_TOKEN,
-      twilioSignature,
-      url,
-      req.body  // Parsed body object
-    );
-
-    if (!isValid) {
-      console.error(`[WEBHOOK:${reqId}] Invalid webhook signature from:`, req.ip);
-      console.error(`[WEBHOOK:${reqId}] Expected:`, twilioSignature);
-      console.error(`[WEBHOOK:${reqId}] URL:`, url);
-      return res.status(401).send('Invalid signature');
-    }
-
-    console.log(`[WEBHOOK:${reqId}] Signature verified successfully`);
+  if (!twilioSignature) {
+    console.error(`[WEBHOOK:${reqId}] Missing signature header from:`, req.ip);
+    return res.status(401).send('Missing signature');
   }
+
+  // Support Railway/reverse proxy forwarded headers
+  // Prefer configured WEBHOOK_URL to avoid fragile header-based URL reconstruction
+  const configuredUrl = process.env.WEBHOOK_URL;
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  const url = configuredUrl || `${protocol}://${host}/webhook`;
+
+  // Use Twilio's official validateRequest function
+  const isValid = twilio.validateRequest(
+    process.env.TWILIO_AUTH_TOKEN,
+    twilioSignature,
+    url,
+    req.body  // Parsed body object
+  );
+
+  if (!isValid) {
+    console.error(`[WEBHOOK:${reqId}] Invalid webhook signature from:`, req.ip);
+    console.error(`[WEBHOOK:${reqId}] URL:`, url);
+    return res.status(401).send('Invalid signature');
+  }
+
+  console.log(`[WEBHOOK:${reqId}] Signature verified successfully`);
 
   const from = req.body.From;
   const rawText = req.body.Body || "";
+  const userHash = hashPhone(from);
 
   // Validate phone number format (prevent NoSQL injection)
   if (!isValidWhatsAppPhone(from)) {
@@ -851,8 +1119,14 @@ app.post("/webhook", async (req, res) => {
   const text = normalize(sanitizeInput(rawText));
   const messageSid = req.body.MessageSid;
 
-  // Log message_sent event
-  await logEvent('message_sent', from, { message_length: rawText.length, message_type: 'unknown' });
+  // Rate limiting — check before logging events to avoid inflating stats
+  const rateLimit = await checkRateLimit(from);
+  if (!rateLimit.allowed) {
+    if (rateLimit.sendNotice) {
+      await reply(from, `Limite diário de mensagens atingido. Tente novamente amanhã.`);
+    }
+    return res.sendStatus(204);
+  }
 
   // Check if this is a new user
   const userIsNew = await isNewUser(from);
@@ -882,12 +1156,8 @@ Experimenta mandar algo como:
     }
   }
 
-  // Rate limiting (Sprint 9)
-  const rateLimit = checkRateLimit(from);
-  if (!rateLimit.allowed) {
-    await reply(from, `Limite diário de mensagens atingido. Tente novamente amanhã.`);
-    return res.sendStatus(204);
-  }
+  // Log message_sent event (after consent check — only for consenting users)
+  await logEvent('message_sent', from, { message_length: rawText.length, message_type: 'unknown' });
 
   // Retry protection
   if (!messageSid) {
@@ -900,33 +1170,55 @@ Experimenta mandar algo como:
 
   processedMessages.add(messageSid);
 
-  if (processedMessages.size > MAX_PROCESSED_MESSAGES) {
-    const iterator = processedMessages.values();
-    const first = iterator.next().value;
+  while (processedMessages.size > MAX_PROCESSED_MESSAGES) {
+    const first = processedMessages.values().next().value;
     processedMessages.delete(first);
   }
 
-  // Load session from MongoDB
-  let session = sessions[from];
+  // Load session from MongoDB (with TTL check on in-memory cache)
+  const sessionKey = hashPhone(from); // Use hash as key — raw phone numbers never stored in memory
+  let session = sessions[sessionKey];
+  let sessionDirty = false; // Track whether session state changed (reduces MongoDB writes)
+
+  function markSessionDirty() {
+    sessionDirty = true;
+  }
+
+  async function saveSessionIfDirty() {
+    if (sessionDirty) {
+      await setSession(from, sessions[sessionKey]);
+      sessionDirty = false;
+    }
+  }
+  if (session && Date.now() - new Date(session.updatedAt).getTime() > SESSION_TTL_MS) {
+    delete sessions[sessionKey];
+    session = null;
+  }
   if (!session) {
     const mongoSession = await getSession(from);
     session = mongoSession || { state: "IDLE" };
-    sessions[from] = session;
+    sessions[sessionKey] = session;
   }
 
-  // Save session to MongoDB immediately after load
-  await setSession(from, session);
+  // Reset session if user typed a command during an active confirmation flow
+  if (session.state !== "IDLE" && text !== "sim" && text !== "nao" && text !== "não") {
+    const isCommand = COMMANDS.has(text) || /^\/pago\s+/.test(text);
+    if (isCommand) {
+      markSessionDirty(); sessions[sessionKey] = { state: "IDLE" };
+      await saveSessionIfDirty();
+      session = sessions[sessionKey];
+    }
+  }
 
   // Command: hoje
   if (text === "hoje") {
     await logEvent('command_used', from, { command: 'hoje' });
 
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
+    const utcStart = getAngolaMidnightUTC();
 
     const docs = await transactions.find({
-      user_phone: from,
-      date: { $gte: start }
+      user_hash: userHash,
+      date: { $gte: utcStart }
     }).toArray();
 
     let total = 0;
@@ -951,7 +1243,7 @@ Experimenta mandar algo como:
   if (text === "/quemedeve") {
     await logEvent('command_used', from, { command: 'quemedeve' });
     const docs = await debts.find({
-      user_phone: from,
+      user_hash: userHash,
       type: "recebido",
       settled: { $ne: true }
     }).toArray();
@@ -963,7 +1255,9 @@ Experimenta mandar algo como:
 
     let message = "Quem te deve dinheiro:\n";
     for (const d of docs) {
-      message += `- ${d.debtor}: ${d.amount} Kz\n`;
+      const amt = Number(d.amount);
+      if (!Number.isFinite(amt)) continue;
+      message += `- ${d.debtor}: ${amt} Kz\n`;
     }
     await reply(from, message);
     return res.sendStatus(204);
@@ -973,7 +1267,7 @@ Experimenta mandar algo como:
   if (text === "/quemdevo") {
     await logEvent('command_used', from, { command: 'quemdevo' });
     const docs = await debts.find({
-      user_phone: from,
+      user_hash: userHash,
       type: "devido",
       settled: { $ne: true }
     }).toArray();
@@ -985,7 +1279,9 @@ Experimenta mandar algo como:
 
     let message = "Tu deves dinheiro a:\n";
     for (const d of docs) {
-      message += `- ${d.creditor}: ${d.amount} Kz\n`;
+      const amt = Number(d.amount);
+      if (!Number.isFinite(amt)) continue;
+      message += `- ${d.creditor}: ${amt} Kz\n`;
     }
     await reply(from, message);
     return res.sendStatus(204);
@@ -995,7 +1291,7 @@ Experimenta mandar algo como:
   if (text === "/kilapi") {
     await logEvent('command_used', from, { command: 'kilapi' });
     const docs = await debts.find({
-      user_phone: from,
+      user_hash: userHash,
       settled: { $ne: true }
     }).toArray();
 
@@ -1006,52 +1302,56 @@ Experimenta mandar algo como:
 
     let message = "Dívidas ativas:\n";
     for (const d of docs) {
+      const amt = Number(d.amount);
+      if (!Number.isFinite(amt)) continue;
       if (d.type === "recebido") {
-        message += `- ${d.debtor} te deve: ${d.amount} Kz\n`;
+        message += `- ${d.debtor} te deve: ${amt} Kz\n`;
       } else {
-        message += `- Tu deves a ${d.creditor}: ${d.amount} Kz\n`;
+        message += `- Tu deves a ${d.creditor}: ${amt} Kz\n`;
       }
     }
     await reply(from, message);
     return res.sendStatus(204);
   }
 
-  // Command: /pago - Mark debt as paid
+  // Command: /pago - Mark debt as paid (requires confirmation)
   const pagoMatch = text.match(/^\/pago\s+(.+)/i);
   if (pagoMatch) {
     await logEvent('command_used', from, { command: 'pago' });
     const name = pagoMatch[1].trim();
-    // Escape special regex characters to prevent ReDoS attacks
-    const sanitizedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Exact match on pre-normalized lowercase fields (index-friendly)
+    const nameLower = name.toLowerCase();
     const doc = await debts.findOne({
-      user_phone: from,
+      user_hash: userHash,
       settled: { $ne: true },
       $or: [
-        { creditor: { $regex: new RegExp(sanitizedName, "i") } },
-        { debtor: { $regex: new RegExp(sanitizedName, "i") } }
+        { creditor_lower: nameLower },
+        { debtor_lower: nameLower }
       ]
-    });
+    }, { sort: { date: 1 } });
 
     if (!doc) {
-      await reply(from, "Não encontrei esta dívida. Use /dividas para ver as dívidas ativas.");
+      await reply(from, "Não encontrei esta dívida. Use /kilapi para ver as dívidas ativas.");
       return res.sendStatus(204);
     }
 
-    await debts.updateOne(
-      { _id: doc._id },
-      { $set: { settled: true, settled_date: new Date() } }
-    );
-
-    if (doc.type === "recebido") {
-      await reply(from, `Dívida de ${doc.debtor} (que te deve ${doc.amount} Kz) marcada como paga.`);
-    } else {
-      await reply(from, `Dívida a ${doc.creditor} (que tu deves ${doc.amount} Kz) marcada como paga.`);
-    }
+    // Ask for confirmation before settling
+    markSessionDirty(); sessions[sessionKey] = {
+      state: "AWAITING_PAGO_CONFIRM",
+      pendingPago: { debtId: doc._id, name, type: doc.type, debtor: doc.debtor, creditor: doc.creditor, amount: doc.amount }
+    };
+    await saveSessionIfDirty();
+    const who = doc.type === "recebido" ? `${doc.debtor} te deve` : `tu deves a ${doc.creditor}`;
+    await reply(from, `Marcar como paga: ${who} ${doc.amount} Kz?\nResponde: Sim ou Não`);
     return res.sendStatus(204);
   }
 
   // Command: /stats - Admin only statistics
-  if (text === "/stats" && isAdmin(from)) {
+  if (text === "/stats") {
+    if (!isAdmin(from)) {
+      await reply(from, "Comando reservado para administradores.");
+      return res.sendStatus(204);
+    }
     await logEvent('command_used', from, { command: 'stats' });
     const stats = await getEnhancedStats();
     const message = `📊 Contador Stats
@@ -1153,21 +1453,28 @@ Termos completos: https://riclex.github.io/contador/TERMS.html`;
   if (text === "meusdados" || text === "/meusdados") {
     await logEvent('command_used', from, { command: 'meusdados' });
 
-    // Get all user data
-    const userTransactions = await transactions.find({ user_phone: from }).toArray();
-    const userDebts = await debts.find({ user_phone: from }).toArray();
-    const userEvents = await events.find({ user_hash: from }).toArray();
+    // Get user data (limit transactions to avoid memory issues)
+    const userTransactions = await transactions.find({ user_hash: userHash }).sort({ date: -1 }).limit(100).toArray();
+    const totalTransactions = await transactions.countDocuments({ user_hash: userHash });
+    const userDebts = await debts.find({ user_hash: userHash }).toArray();
+    const userEvents = await events.find({ user_hash: userHash }).toArray();
 
-    const totalIncome = userTransactions.filter(t => t.type === "income").reduce((sum, t) => sum + t.amount, 0);
-    const totalExpenses = userTransactions.filter(t => t.type === "expense").reduce((sum, t) => sum + t.amount, 0);
+    const totalIncome = userTransactions.filter(t => t.type === "income").reduce((sum, t) => {
+      const amt = Number(t.amount);
+      return sum + (Number.isFinite(amt) ? amt : 0);
+    }, 0);
+    const totalExpenses = userTransactions.filter(t => t.type === "expense").reduce((sum, t) => {
+      const amt = Number(t.amount);
+      return sum + (Number.isFinite(amt) ? amt : 0);
+    }, 0);
     const activeDebts = userDebts.filter(d => !d.settled).length;
 
     const message = `📄 TEUS DADOS
 
-👤 Usuário: ${from}
+👤 Usuário: ${from.slice(0, -2).replace(/./g, '•') + from.slice(-2)}
 
 📊 RESUMO:
-• Transações: ${userTransactions.length}
+• Transações: ${userTransactions.length}${totalTransactions > 100 ? ` (últimas 100 de ${totalTransactions})` : ''}
 • Receitas: ${totalIncome.toFixed(2)} Kz
 • Despesas: ${totalExpenses.toFixed(2)} Kz
 • Saldo: ${(totalIncome - totalExpenses).toFixed(2)} Kz
@@ -1186,9 +1493,9 @@ Para apagar todos os teus dados: /apagar`;
     await logEvent('command_used', from, { command: 'apagar' });
 
     // Check if user has data to delete
-    const userTransactions = await transactions.countDocuments({ user_phone: from });
-    const userDebts = await debts.countDocuments({ user_phone: from });
-    const userEvents = await events.countDocuments({ user_hash: from });
+    const userTransactions = await transactions.countDocuments({ user_hash: userHash });
+    const userDebts = await debts.countDocuments({ user_hash: userHash });
+    const userEvents = await events.countDocuments({ user_hash: userHash });
 
     if (userTransactions === 0 && userDebts === 0 && userEvents === 0) {
       await reply(from, "Não tens dados armazenados para apagar.");
@@ -1196,8 +1503,8 @@ Para apagar todos os teus dados: /apagar`;
     }
 
     // Ask for confirmation
-    sessions[from] = { state: "AWAITING_APAGAR_CONFIRM" };
-    await setSession(from, sessions[from]);
+    markSessionDirty(); sessions[sessionKey] = { state: "AWAITING_APAGAR_CONFIRM" };
+    await saveSessionIfDirty();
 
     const message = `⚠️ CONFIRMAÇÃO
 
@@ -1217,11 +1524,10 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
   if (text === "resumo" || text === "/resumo") {
     await logEvent('command_used', from, { command: 'resumo' });
 
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const sevenDaysAgo = new Date(getAngolaMidnightUTC().getTime() - 7 * 24 * 60 * 60 * 1000);
 
     const docs = await transactions.find({
-      user_phone: from,
+      user_hash: userHash,
       date: { $gte: sevenDaysAgo }
     }).toArray();
 
@@ -1235,17 +1541,19 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
     const dailyBreakdown = {};
 
     for (const doc of docs) {
+      const amt = Number(doc.amount);
+      if (!Number.isFinite(amt)) continue;
       if (doc.type === "income") {
-        income += doc.amount;
+        income += amt;
       } else {
-        expenses += doc.amount;
+        expenses += amt;
       }
 
       // Group by day
       const day = new Date(doc.date).toLocaleDateString('pt-AO', { weekday: 'short', day: 'numeric' });
       if (!dailyBreakdown[day]) dailyBreakdown[day] = { income: 0, expenses: 0 };
-      if (doc.type === "income") dailyBreakdown[day].income += doc.amount;
-      else dailyBreakdown[day].expenses += doc.amount;
+      if (doc.type === "income") dailyBreakdown[day].income += amt;
+      else dailyBreakdown[day].expenses += amt;
     }
 
     const balance = income - expenses;
@@ -1274,12 +1582,16 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
   if (text === "mes" || text === "/mes") {
     await logEvent('command_used', from, { command: 'mes' });
 
-    const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const angolaMidnight = getAngolaMidnightUTC();
+    // Start of month in Angola time: get Angola date components, build UTC timestamp
+    const angolaDate = new Date(angolaMidnight.getTime() + ANGOLA_OFFSET_MS);
+    const utcStartOfMonth = new Date(Date.UTC(
+      angolaDate.getUTCFullYear(), angolaDate.getUTCMonth(), 1, 0, 0, 0
+    ) - ANGOLA_OFFSET_MS);
 
     const docs = await transactions.find({
-      user_phone: from,
-      date: { $gte: startOfMonth }
+      user_hash: userHash,
+      date: { $gte: utcStartOfMonth }
     }).toArray();
 
     if (docs.length === 0) {
@@ -1292,10 +1604,12 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
     const categories = {};
 
     for (const doc of docs) {
+      const amt = Number(doc.amount);
+      if (!Number.isFinite(amt)) continue;
       if (doc.type === "income") {
-        income += doc.amount;
+        income += amt;
       } else {
-        expenses += doc.amount;
+        expenses += amt;
       }
 
       // Extract category from description (first word after preposition)
@@ -1314,12 +1628,12 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
       }
 
       if (!categories[category]) categories[category] = { income: 0, expenses: 0 };
-      if (doc.type === "income") categories[category].income += doc.amount;
-      else categories[category].expenses += doc.amount;
+      if (doc.type === "income") categories[category].income += amt;
+      else categories[category].expenses += amt;
     }
 
     const balance = income - expenses;
-    const monthName = now.toLocaleDateString('pt-AO', { month: 'long', year: 'numeric' });
+    const monthName = angolaDate.toLocaleDateString('pt-AO', { month: 'long', year: 'numeric' });
 
     let message = `📊 ${monthName.charAt(0).toUpperCase() + monthName.slice(1)}
 
@@ -1343,136 +1657,224 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
   // Awaiting confirmation (regular transaction)
   if (session.state === "AWAITING_CONFIRMATION") {
     if (text === "sim") {
+      const amount = Number(session.pending.amount);
+      if (!Number.isFinite(amount) || amount <= 0 || amount > 1_000_000_000) {
+        await reply(from, "Valor inválido. Tenta novamente.");
+        markSessionDirty(); sessions[sessionKey] = { state: "IDLE" };
+        await saveSessionIfDirty();
+        return res.sendStatus(204);
+      }
       try {
         await transactions.insertOne({
           message_sid: messageSid,
-          user_phone: from,
+          user_hash: userHash,
           type: session.pending.type,
-          amount: Number(session.pending.amount),
+          amount: amount,
           description: session.pending.description,
           date: new Date()
         });
         await logEvent('transaction_confirmed', from, {
-          amount: session.pending.amount,
-          type: session.pending.type,
-          description: session.pending.description
+          type: session.pending.type
         });
       } catch (e) {
         if (e.code !== 11000) throw e;
       }
-      await reply(from, "Registado.");
+      await replyWithRetry(from, "Registado.");
     } else {
       await reply(from, "Cancelado.");
     }
-    sessions[from] = { state: "IDLE" };
-    await setSession(from, sessions[from]);
+    markSessionDirty(); sessions[sessionKey] = { state: "IDLE" };
+    await saveSessionIfDirty();
     return res.sendStatus(204);
   }
 
   // Awaiting debt confirmation
   if (session.state === "AWAITING_DEBT_CONFIRMATION") {
     if (text === "sim") {
+      const amount = Number(session.pendingDebt.amount);
+      if (!Number.isFinite(amount) || amount <= 0 || amount > 1_000_000_000) {
+        await reply(from, "Valor inválido. Tenta novamente.");
+        markSessionDirty(); sessions[sessionKey] = { state: "IDLE" };
+        await saveSessionIfDirty();
+        return res.sendStatus(204);
+      }
       try {
         await debts.insertOne({
           message_sid: messageSid,
-          user_phone: from,
+          user_hash: userHash,
           type: session.pendingDebt.type,
           creditor: session.pendingDebt.creditor,
           debtor: session.pendingDebt.debtor,
-          amount: session.pendingDebt.amount,
+          creditor_lower: session.pendingDebt.creditor.toLowerCase(),
+          debtor_lower: session.pendingDebt.debtor.toLowerCase(),
+          amount: amount,
           description: session.pendingDebt.description,
           date: new Date(),
           settled: false,
           settled_date: null
         });
         await logEvent('debt_created', from, {
-          amount: session.pendingDebt.amount,
-          type: session.pendingDebt.type,
-          debtor: session.pendingDebt.debtor,
-          creditor: session.pendingDebt.creditor
+          type: session.pendingDebt.type
         });
-        await reply(from, "Dívida registada.");
+        await replyWithRetry(from, "Dívida registada.");
       } catch (e) {
         if (e.code !== 11000) throw e;
-        await reply(from, "Dívida registada.");
+        // Duplicate key = already recorded by a previous request, no action needed
       }
     } else {
       await reply(from, "Cancelado.");
     }
-    sessions[from] = { state: "IDLE" };
-    await setSession(from, sessions[from]);
+    markSessionDirty(); sessions[sessionKey] = { state: "IDLE" };
+    await saveSessionIfDirty();
     return res.sendStatus(204);
   }
 
-  // Handle Awaiting Debtor Name state (for regex parses where name was 'user')
+  // Handle /pago confirmation state
+  if (session.state === "AWAITING_PAGO_CONFIRM") {
+    if (text === "sim") {
+      await debts.updateOne(
+        { _id: session.pendingPago.debtId },
+        { $set: { settled: true, settled_date: new Date() } }
+      );
+      const p = session.pendingPago;
+      const who = p.type === "recebido" ? `${p.debtor} te deve` : `tu deves a ${p.creditor}`;
+      await reply(from, `Dívida de ${who} ${p.amount} Kz marcada como paga.`);
+
+      // Check for remaining debts with same name
+      const nameLower = p.name.toLowerCase();
+      const remaining = await debts.countDocuments({
+        user_hash: userHash,
+        settled: { $ne: true },
+        _id: { $ne: p.debtId },
+        $or: [{ creditor_lower: nameLower }, { debtor_lower: nameLower }]
+      });
+      if (remaining > 0) {
+        await reply(from, `Mais ${remaining} dívida(s) com este nome. Manda /pago ${p.name} de novo.`);
+      }
+    } else {
+      await reply(from, "Operação cancelada.");
+    }
+    markSessionDirty(); sessions[sessionKey] = { state: "IDLE" };
+    await saveSessionIfDirty();
+    return res.sendStatus(204);
+  }
+
+  // Handle Awaiting Debtor Name state (for OpenAI parses where name was 'user')
   if (session.state === "AWAITING_DEBTOR_NAME") {
     const pendingDebt = session.pendingDebt;
 
     if (text === "nao" || text === "não") {
       await reply(from, "Cancelado.");
-      sessions[from] = { state: "IDLE" };
-      await setSession(from, sessions[from]);
+      markSessionDirty(); sessions[sessionKey] = { state: "IDLE" };
+      await saveSessionIfDirty();
       return res.sendStatus(204);
     }
 
     // Update the name based on debt type
-    if (pendingDebt.type === "recebido" && pendingDebt.debtor === "user") {
-      pendingDebt.debtor = text.trim();
-    } else if (pendingDebt.type === "devido" && pendingDebt.creditor === "user") {
-      pendingDebt.creditor = text.trim();
+    const name = text.trim();
+
+    // Validate name: max 30 chars, letters/accented chars/spaces only, no commands
+    if (name.length === 0 || name.length > 30 || !/^[a-zA-Z\u00C0-\u00FF\s]+$/.test(name)) {
+      await reply(from, "Nome inválido. Usa só letras e espaços (máximo 30 caracteres).");
+      markSessionDirty(); sessions[sessionKey] = { state: "IDLE" };
+      await saveSessionIfDirty();
+      return res.sendStatus(204);
     }
 
-    try {
-      await debts.insertOne({
-        message_sid: messageSid,
-        user_phone: from,
-        type: pendingDebt.type,
-        creditor: pendingDebt.creditor,
-        debtor: pendingDebt.debtor,
-        amount: pendingDebt.amount,
-        description: pendingDebt.description,
-        date: new Date(),
-        settled: false,
-        settled_date: null
-      });
-      await logEvent('debt_created', from, {
-        amount: pendingDebt.amount,
-        type: pendingDebt.type,
-        debtor: pendingDebt.debtor,
-        creditor: pendingDebt.creditor
-      });
-      await reply(from, "Dívida registada.");
-    } catch (e) {
-      if (e.code !== 11000) throw e;
-      await reply(from, "Dívida registada.");
+    // For "recebido" (someone owes user): debtor="user" (unknown), need debtor name
+    if (pendingDebt.type === "recebido" && pendingDebt.debtor === "user") {
+      pendingDebt.debtor = name;
+    // For "devido" (user owes someone): creditor="user" (unknown), need creditor name
+    } else if (pendingDebt.type === "devido" && pendingDebt.creditor === "user") {
+      pendingDebt.creditor = name;
     }
-    sessions[from] = { state: "IDLE" };
-    await setSession(from, sessions[from]);
+
+    const amount = Number(pendingDebt.amount);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 1_000_000_000) {
+      await reply(from, "Valor inválido. Tenta novamente.");
+      markSessionDirty(); sessions[sessionKey] = { state: "IDLE" };
+      await saveSessionIfDirty();
+      return res.sendStatus(204);
+    }
+
+    // Go to confirmation instead of inserting directly (consistent with other flows)
+    markSessionDirty(); sessions[sessionKey] = {
+      state: "AWAITING_DEBT_CONFIRMATION",
+      pendingDebt: pendingDebt
+    };
+    await saveSessionIfDirty();
+    const who = pendingDebt.type === "recebido" ? `${name} te deve` : `tu deves a ${name}`;
+    await reply(from, `Registar que ${who} ${pendingDebt.amount} Kz?\nResponde: Sim ou Não`);
     return res.sendStatus(204);
   }
 
   // Awaiting apagar confirmation (right to be forgotten)
   if (session.state === "AWAITING_APAGAR_CONFIRM") {
-    if (text === "sim" || text === "yes") {
-      // Delete all user data
-      const deleteTrans = await transactions.deleteMany({ user_phone: from });
-      const deleteDebts = await debts.deleteMany({ user_phone: from });
-      const deleteEvents = await events.deleteMany({ user_hash: from });
-      const deleteSession = await db.collection('sessions').deleteOne({ user_phone: from });
-      const deleteOnboarding = await db.collection('onboarding').deleteOne({ user_phone: from });
-
-      await logEvent('data_deleted', from, {
-        transactions_deleted: deleteTrans.deletedCount,
-        debts_deleted: deleteDebts.deletedCount,
-        events_deleted: deleteEvents.deletedCount
+    if (text === "sim") {
+      // Record erasure intent first — if process crashes mid-deletion, this proves the request existed
+      // Use a double-hash so the audit record cannot be linked back to the original phone number
+      const auditId = crypto.randomUUID();
+      const auditHash = hashPhone(userHash); // one-way anonymized key
+      await db.collection('events').insertOne({
+        _id: auditId,
+        event_name: 'data_deletion_started',
+        audit_hash: auditHash,
+        timestamp: new Date()
       });
 
-      await reply(from, "✅ Todos os teus dados foram apagados permanentemente.");
+      try {
+        // Delete all user data atomically via MongoDB transaction
+        const mongoSession = mongo.startSession();
+        let deleteCounts = { transactions: 0, debts: 0, events: 0 };
+        try {
+          await mongoSession.withTransaction(async () => {
+            const dt = await transactions.deleteMany({ user_hash: userHash }, { session: mongoSession });
+            const dd = await debts.deleteMany({ user_hash: userHash }, { session: mongoSession });
+            const de = await events.deleteMany({ user_hash: userHash }, { session: mongoSession });
+            await db.collection('sessions').deleteOne({ phone_hash: hashPhone(from) }, { session: mongoSession });
+            await db.collection('onboarding').deleteOne({ user_hash: userHash }, { session: mongoSession });
+            deleteCounts = {
+              transactions: dt.deletedCount,
+              debts: dd.deletedCount,
+              events: de.deletedCount
+            };
+          });
+        } finally {
+          await mongoSession.endSession();
+        }
+
+        // Also delete rate_limits (uses raw phone digits, not user_hash)
+        const normalizedPhone = from.replace(/\D/g, '');
+        await rateLimits.deleteMany({ _id: { $regex: `^${normalizedPhone}:` } });
+
+        // Replace the intent record with a completion record
+        await db.collection('events').updateOne(
+          { _id: auditId },
+          {
+            $set: {
+              event_name: 'data_deleted',
+              metadata: {
+                transactions_deleted: deleteCounts.transactions,
+                debts_deleted: deleteCounts.debts,
+                events_deleted: deleteCounts.events
+              }
+            }
+          }
+        );
+
+        await replyWithRetry(from, "✅ Todos os teus dados foram apagados permanentemente.");
+        delete sessions[sessionKey];
+      } catch (error) {
+        console.error('[/APAGAR] Error during deletion:', error.message);
+        await reply(from, "Erro ao apagar dados. Tenta novamente mais tarde.");
+        markSessionDirty(); sessions[sessionKey] = { state: "IDLE" };
+        await saveSessionIfDirty();
+      }
     } else {
       await reply(from, "Operação cancelada. Os teus dados permanecem armazenados.");
+      markSessionDirty(); sessions[sessionKey] = { state: "IDLE" };
+      await saveSessionIfDirty();
     }
-    sessions[from] = { state: "IDLE" };
-    await setSession(from, sessions[from]);
     return res.sendStatus(204);
   }
 
@@ -1485,12 +1887,21 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
       !parsedDebt.error &&
       ["recebido", "devido"].includes(parsedDebt.type) &&
       Number.isFinite(parsedDebt.amount) &&
+      parsedDebt.amount > 0 &&
+      parsedDebt.amount <= 1_000_000_000 &&
       typeof parsedDebt.creditor === "string" &&
-      typeof parsedDebt.debtor === "string"
+      parsedDebt.creditor.trim().length > 0 &&
+      typeof parsedDebt.debtor === "string" &&
+      parsedDebt.debtor.trim().length > 0
     ) {
-      // Check if we need user input to fill in a name
-      if (parsedDebt.creditor === "user" || parsedDebt.debtor === "user") {
-        sessions[from] = {
+      // Check if we need user input to fill in the counterparty name
+      // Only enter AWAITING_DEBTOR_NAME when the COUNTERPARTY is "user" (unknown),
+      // not when the self-party is "user" (which is always true for regex parses)
+      if (
+        (parsedDebt.type === "recebido" && parsedDebt.debtor === "user") ||
+        (parsedDebt.type === "devido" && parsedDebt.creditor === "user")
+      ) {
+        markSessionDirty(); sessions[sessionKey] = {
           state: "AWAITING_DEBTOR_NAME",
           pendingDebt: {
             type: parsedDebt.type,
@@ -1500,7 +1911,7 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
             description: parsedDebt.description
           }
         };
-        await setSession(from, sessions[from]);
+        await saveSessionIfDirty();
         if (parsedDebt.type === "recebido") {
           await reply(from, "Quem te deve? Escreve o nome.");
         } else {
@@ -1510,7 +1921,7 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
       }
 
       // Full info available, ask for confirmation
-      sessions[from] = {
+      markSessionDirty(); sessions[sessionKey] = {
         state: "AWAITING_DEBT_CONFIRMATION",
         pendingDebt: {
           type: parsedDebt.type,
@@ -1520,7 +1931,7 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
           description: parsedDebt.description
         }
       };
-      await setSession(from, sessions[from]);
+      await saveSessionIfDirty();
 
       const whoOwes = parsedDebt.type === "recebido" ? parsedDebt.debtor : parsedDebt.creditor;
       const debtText = parsedDebt.type === "recebido"
@@ -1556,11 +1967,17 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
     parsed.amount = Number(parsed.amount);
     parsed.description = parsed.description.trim();
 
-    sessions[from] = {
+    // Validate amount before presenting confirmation prompt
+    if (parsed.amount <= 0 || parsed.amount > 1_000_000_000) {
+      await reply(from, "Valor inválido. Tenta novamente.");
+      return res.sendStatus(204);
+    }
+
+    markSessionDirty(); sessions[sessionKey] = {
       state: "AWAITING_CONFIRMATION",
       pending: parsed
     };
-    await setSession(from, sessions[from]);
+    await saveSessionIfDirty();
 
     await reply(
       from,
@@ -1574,11 +1991,24 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
     return res.sendStatus(204);
   }
 
+}));
+
+app.get("/health", (_, res) => {
+  if (!mongoConnected) {
+    return res.status(503).json({ status: "unhealthy", mongodb: "disconnected" });
+  }
+  res.json({ status: "ok", mongodb: "connected", openai: openaiHealthy ? "connected" : "degraded" });
 });
 
-app.get("/health", (_, res) => res.send("ok"));
+// Global error handler - catches unhandled errors from async route handlers
+app.use((err, req, res, next) => {
+  console.error(`[ERROR] Unhandled error on ${req.method} ${req.path}:`, err.message);
+  if (!res.headersSent) {
+    res.status(500).send('Internal Server Error');
+  }
+});
 
-app.listen(process.env.PORT || 3000);
+const server = app.listen(process.env.PORT || 3000);
 
 // --- Graceful shutdown
 let serverClosing = false;
@@ -1587,6 +2017,8 @@ async function gracefulShutdown() {
   if (serverClosing) return;
   serverClosing = true;
   console.log('Shutting down gracefully...');
+
+  server.close(); // Stop accepting new connections, drain in-flight requests
 
   try {
     // Close MongoDB connection
@@ -1599,8 +2031,26 @@ async function gracefulShutdown() {
   process.exit(0);
 }
 
-// --- Export functions for testing
-export { parseTransactionRegex, parseDebtRegex };
-
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
+
+} // end if (isMainModule)
+
+// --- Export pure functions for testing (no server side effects when imported)
+// Note: checkRateLimit is async and requires MongoDB — not exported for unit testing
+export {
+  parseTransactionRegex,
+  parseDebtRegex,
+  normalize,
+  sanitizeInput,
+  hashPhone,
+  getCacheKey,
+  getCachedResponse,
+  setCachedResponse,
+  getCacheStats,
+  getAngolaMidnightUTC,
+  INCOME_VERBS,
+  EXPENSE_VERBS,
+  DEBT_VERBS_RECEBIDO,
+  DEBT_VERBS_DEVIDO
+};

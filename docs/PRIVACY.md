@@ -1,6 +1,6 @@
 # Política de Privacidade - Contador
 
-**Última atualização:** 16 de Março de 2026
+**Última atualização:** 15 de Abril de 2026
 
 ## 1. Introdução
 
@@ -12,7 +12,7 @@ O **Contador** é um assistente financeiro via WhatsApp que permite aos usuário
 
 | Dado | Finalidade | Base Legal |
 |------|------------|------------|
-| **Número de telefone WhatsApp** (armazenado com hash SHA-256) | Identificação única do usuário | Consentimento |
+| **Número de telefone WhatsApp** (armazenado com hash SHA-256 nas coleções de transações, dívidas, eventos, sessões e onboarding; armazenado em formato normalizado sem hash apenas na coleção de limitação de uso para composição da chave diária) | Identificação única do usuário | Consentimento |
 | **Transações** (vendas, gastos, descrições) | Fornecer resumos de saldo e histórico | Consentimento |
 | **Dívidas** (credor, devedor, valores, descrições) | Rastrear e gerenciar dívidas | Consentimento |
 | **Eventos de auditoria** (primeiro uso, consentimento, mensagens enviadas) | Compliance e segurança | Legítimo interesse |
@@ -79,7 +79,8 @@ Os dados são armazenados no **MongoDB Atlas** com servidores localizados na **U
 | Tipo de Dado | Período de Retenção |
 |--------------|---------------------|
 | Dados de transações e dívidas | Até solicitação de exclusão via `/apagar` |
-| Eventos de auditoria | 2 anos após exclusão da conta |
+| Eventos de auditoria | 2 anos após exclusão da conta (eliminação automática via índice TTL) |
+| Registos de limitação de uso (rate limits) | Eliminados automaticamente após 24h ou ao usar `/apagar` |
 | Sessões de usuário | 30 minutos após última atividade |
 | Cache de respostas | 24 horas |
 
@@ -87,12 +88,14 @@ Os dados são armazenados no **MongoDB Atlas** com servidores localizados na **U
 
 Implementamos as seguintes medidas técnicas e organizacionais:
 
-- **Pseudonimização:** Números de telefone armazenados com hash SHA-256
+- **Pseudonimização:** Números de telefone armazenados exclusivamente com hash SHA-256 em todas as coleções (transações, dívidas, eventos, sessões e onboarding)
 - **Criptografia em trânsito:** HTTPS/TLS para todas as comunicações
-- **Verificação de assinatura:** Validação SHA256 de webhooks Twilio
-- **Sanitização de input:** Remoção de caracteres de controle
-- **Rate limiting:** 50 mensagens/usuário/dia para prevenir abuso
-- **Gestão de sessão:** Sessões com TTL de 30 minutos
+- **Verificação de assinatura:** Validação SHA256 obrigatória de webhooks Twilio (sem caminho de bypass)
+- **Sanitização de input:** Remoção de caracteres de controle, caracteres de largura zero e overrides direcionais Unicode
+- **Rate limiting:** 50 mensagens/usuário/dia para prevenir abuso; registos eliminados ao usar `/apagar`
+- **Gestão de sessão:** Sessões com TTL de 30 minutos, armazenadas com hash (nunca em texto claro)
+- **Eliminação atômica:** O comando `/apagar` deleta todos os dados de forma atômica (transação MongoDB), incluindo transações, dívidas, eventos, sessões e registos de limitação de uso
+- **Cabeçalhos de segurança HTTP:** Middleware `helmet` para proteção contra vulnerabilidades web comuns
 
 ## 6. Partilha de Dados
 
@@ -123,7 +126,7 @@ Estas transferências são necessárias para a prestação do serviço e contam 
 | Comando | Ação |
 |---------|------|
 | `/meusdados` | Visualizar todos os dados armazenados |
-| `/apagar` | Deletar permanentemente todos os dados |
+| `/apagar` | Deletar permanentemente todos os dados (de forma atômica para transações, dívidas e eventos; registos de limitação de uso são eliminados separadamente) |
 
 ### 7.2 Contato com a Administração
 
