@@ -591,6 +591,9 @@ async function parseDebtOpenAI(text) {
     return parsed;
   } catch (error) {
     console.error('OpenAI debt parsing error:', error.message);
+    if (error instanceof SyntaxError) {
+      return { error: 'ambiguous' };
+    }
     return { error: 'service_unavailable', message: 'Failed to parse debt' };
   }
 }
@@ -782,6 +785,9 @@ async function parseTransaction(text) {
     return result;
   } catch (error) {
     console.error('OpenAI API error in parseTransaction:', error.message);
+    if (error instanceof SyntaxError) {
+      return { error: 'ambiguous' };
+    }
     return { error: 'service_unavailable', message: 'Failed to parse transaction' };
   }
 }
