@@ -989,24 +989,18 @@ Experimenta mandar algo como:
 
     const utcStart = getAngolaMidnightUTC();
 
-    const docs = await transactions.find({
-      user_hash: userHash,
-      date: { $gte: utcStart }
-    }).toArray();
+    const aggResult = await transactions.aggregate([
+      { $match: { user_hash: userHash, date: { $gte: utcStart } } },
+      { $group: {
+        _id: null,
+        income: { $sum: { $cond: [{ $eq: ['$type', 'income'] }, '$amount', 0] } },
+        expense: { $sum: { $cond: [{ $eq: ['$type', 'expense'] }, '$amount', 0] } }
+      }}
+    ]).toArray();
 
-    let total = 0;
-
-    for (const t of docs) {
-      const amount = Number(t.amount);
-
-      if (!Number.isFinite(amount)) continue;
-
-      if (t.type === "income") {
-        total += amount;
-      } else if (t.type === "expense") {
-        total -= amount;
-      }
-    }
+    const income = Number(aggResult[0]?.income) || 0;
+    const expense = Number(aggResult[0]?.expense) || 0;
+    const total = Number.isFinite(income) && Number.isFinite(expense) ? income - expense : 0;
 
     await reply(from, `Total de hoje: ${total} Kz`);
     return res.sendStatus(204);
@@ -1019,7 +1013,7 @@ Experimenta mandar algo como:
       user_hash: userHash,
       type: "recebido",
       settled: { $ne: true }
-    }).toArray();
+    }).limit(50).toArray();
 
     if (docs.length === 0) {
       await reply(from, "Ninguém te deve dinheiro.");
@@ -1032,6 +1026,7 @@ Experimenta mandar algo como:
       if (!Number.isFinite(amt)) continue;
       message += `- ${d.debtor}: ${amt} Kz\n`;
     }
+    if (docs.length === 50) message += '\n(mostrando primeiras 50 dívidas)';
     await reply(from, message);
     return res.sendStatus(204);
   }
@@ -1043,7 +1038,7 @@ Experimenta mandar algo como:
       user_hash: userHash,
       type: "devido",
       settled: { $ne: true }
-    }).toArray();
+    }).limit(50).toArray();
 
     if (docs.length === 0) {
       await reply(from, "Tu não deves dinheiro a ninguém.");
@@ -1056,6 +1051,7 @@ Experimenta mandar algo como:
       if (!Number.isFinite(amt)) continue;
       message += `- ${d.creditor}: ${amt} Kz\n`;
     }
+    if (docs.length === 50) message += '\n(mostrando primeiras 50 dívidas)';
     await reply(from, message);
     return res.sendStatus(204);
   }
@@ -1066,7 +1062,7 @@ Experimenta mandar algo como:
     const docs = await debts.find({
       user_hash: userHash,
       settled: { $ne: true }
-    }).toArray();
+    }).limit(50).toArray();
 
     if (docs.length === 0) {
       await reply(from, "Não tens dívidas ativas.");
@@ -1083,6 +1079,7 @@ Experimenta mandar algo como:
         message += `- Tu deves a ${d.creditor}: ${amt} Kz\n`;
       }
     }
+    if (docs.length === 50) message += '\n(mostrando primeiras 50 dívidas)';
     await reply(from, message);
     return res.sendStatus(204);
   }
@@ -1230,7 +1227,8 @@ Termos completos: https://riclex.github.io/contador/TERMS.html`;
     const userTransactions = await transactions.find({ user_hash: userHash }).sort({ date: -1 }).limit(100).toArray();
     const totalTransactions = await transactions.countDocuments({ user_hash: userHash });
     const userDebts = await debts.find({ user_hash: userHash }).toArray();
-    const userEvents = await events.find({ user_hash: userHash }).toArray();
+    const userEvents = await events.find({ user_hash: userHash }, { projection: { event_name: 1, timestamp: 1 } }).sort({ timestamp: -1 }).limit(100).toArray();
+    const totalEvents = await events.countDocuments({ user_hash: userHash });
 
     const totalIncome = userTransactions.filter(t => t.type === "income").reduce((sum, t) => {
       const amt = Number(t.amount);
@@ -1254,7 +1252,7 @@ Termos completos: https://riclex.github.io/contador/TERMS.html`;
 • Dívidas ativas: ${activeDebts}
 
 🔒 EVENTOS (auditoria):
-• Total: ${userEvents.length}
+• Total: ${totalEvents}${totalEvents > 100 ? ' (últimos 100)' : ''}
 
 Para apagar todos os teus dados: /apagar`;
     await reply(from, message);
@@ -1298,39 +1296,41 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
     await logEvent('command_used', from, { command: 'resumo' });
 
     const sevenDaysAgo = new Date(getAngolaMidnightUTC().getTime() - 7 * 24 * 60 * 60 * 1000);
+    const matchStage = { $match: { user_hash: userHash, date: { $gte: sevenDaysAgo } } };
 
-    const docs = await transactions.find({
-      user_hash: userHash,
-      date: { $gte: sevenDaysAgo }
-    }).toArray();
+    const [totalsAgg, dailyAgg] = await Promise.all([
+      transactions.aggregate([
+        matchStage,
+        { $group: {
+          _id: null,
+          income: { $sum: { $cond: [{ $eq: ['$type', 'income'] }, '$amount', 0] } },
+          expense: { $sum: { $cond: [{ $eq: ['$type', 'expense'] }, '$amount', 0] } }
+        }}
+      ]).toArray(),
+      transactions.aggregate([
+        matchStage,
+        { $group: {
+          _id: { day: { $dateToString: { format: '%Y-%m-%d', date: '$date' } }, type: '$type' },
+          total: { $sum: '$amount' }
+        }},
+        { $group: {
+          _id: '$_id.day',
+          income: { $sum: { $cond: [{ $eq: ['$_id.type', 'income'] }, '$total', 0] } },
+          expense: { $sum: { $cond: [{ $eq: ['$_id.type', 'expense'] }, '$total', 0] } }
+        }},
+        { $sort: { _id: 1 } }
+      ]).toArray()
+    ]);
 
-    if (docs.length === 0) {
+    const income = Number(totalsAgg[0]?.income) || 0;
+    const expenses = Number(totalsAgg[0]?.expense) || 0;
+
+    if (!totalsAgg.length || (income === 0 && expenses === 0)) {
       await reply(from, "Sem transações nos últimos 7 dias.");
       return res.sendStatus(204);
     }
 
-    let income = 0;
-    let expenses = 0;
-    const dailyBreakdown = {};
-
-    for (const doc of docs) {
-      const amt = Number(doc.amount);
-      if (!Number.isFinite(amt)) continue;
-      if (doc.type === "income") {
-        income += amt;
-      } else {
-        expenses += amt;
-      }
-
-      // Group by day
-      const day = new Date(doc.date).toLocaleDateString('pt-AO', { weekday: 'short', day: 'numeric' });
-      if (!dailyBreakdown[day]) dailyBreakdown[day] = { income: 0, expenses: 0 };
-      if (doc.type === "income") dailyBreakdown[day].income += amt;
-      else dailyBreakdown[day].expenses += amt;
-    }
-
-    const balance = income - expenses;
-    const days = Object.keys(dailyBreakdown);
+    const balance = Number.isFinite(income) && Number.isFinite(expenses) ? income - expenses : 0;
 
     let message = `📊 Resumo (Últimos 7 dias)
 
@@ -1340,11 +1340,13 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
 
 --- Por dia:`;
 
-    for (const day of days) {
-      const d = dailyBreakdown[day];
-      const dayBalance = d.income - d.expenses;
+    for (const day of dailyAgg) {
+      const dayIncome = Number(day.income) || 0;
+      const dayExpense = Number(day.expense) || 0;
+      const dayBalance = Number.isFinite(dayIncome) && Number.isFinite(dayExpense)
+        ? dayIncome - dayExpense : 0;
       const signal = dayBalance >= 0 ? '+' : '';
-      message += `\n${day}: ${signal}${dayBalance.toFixed(2)} Kz`;
+      message += `\n${day._id}: ${signal}${dayBalance.toFixed(2)} Kz`;
     }
 
     await reply(from, message);
@@ -1361,51 +1363,41 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
     const utcStartOfMonth = new Date(Date.UTC(
       angolaDate.getUTCFullYear(), angolaDate.getUTCMonth(), 1, 0, 0, 0
     ) - ANGOLA_OFFSET_MS);
+    const matchStage = { $match: { user_hash: userHash, date: { $gte: utcStartOfMonth } } };
 
-    const docs = await transactions.find({
-      user_hash: userHash,
-      date: { $gte: utcStartOfMonth }
-    }).toArray();
+    const [totalsAgg, categoryAgg] = await Promise.all([
+      transactions.aggregate([
+        matchStage,
+        { $group: {
+          _id: null,
+          income: { $sum: { $cond: [{ $eq: ['$type', 'income'] }, '$amount', 0] } },
+          expense: { $sum: { $cond: [{ $eq: ['$type', 'expense'] }, '$amount', 0] } }
+        }}
+      ]).toArray(),
+      transactions.aggregate([
+        matchStage,
+        { $group: {
+          _id: { category: { $toLower: '$description' }, type: '$type' },
+          total: { $sum: '$amount' }
+        }},
+        { $group: {
+          _id: '$_id.category',
+          income: { $sum: { $cond: [{ $eq: ['$_id.type', 'income'] }, '$total', 0] } },
+          expense: { $sum: { $cond: [{ $eq: ['$_id.type', 'expense'] }, '$total', 0] } }
+        }},
+        { $sort: { _id: 1 } }
+      ]).toArray()
+    ]);
 
-    if (docs.length === 0) {
+    const income = Number(totalsAgg[0]?.income) || 0;
+    const expenses = Number(totalsAgg[0]?.expense) || 0;
+
+    if (!totalsAgg.length || (income === 0 && expenses === 0)) {
       await reply(from, "Sem transações neste mês.");
       return res.sendStatus(204);
     }
 
-    let income = 0;
-    let expenses = 0;
-    const categories = {};
-
-    for (const doc of docs) {
-      const amt = Number(doc.amount);
-      if (!Number.isFinite(amt)) continue;
-      if (doc.type === "income") {
-        income += amt;
-      } else {
-        expenses += amt;
-      }
-
-      // Extract category from description (first word after preposition)
-      const descLower = doc.description.toLowerCase();
-      let category = "Outros";
-      for (const prep of ['de ', 'do ', 'da ', 'dos ', 'das ', 'em ']) {
-        const idx = descLower.indexOf(prep);
-        if (idx !== -1) {
-          const start = idx + prep.length;
-          const end = descLower.indexOf(' ', start);
-          category = end !== -1 ? descLower.substring(start, end) : descLower.substring(start);
-          // Capitalize first letter
-          category = category.charAt(0).toUpperCase() + category.slice(1);
-          break;
-        }
-      }
-
-      if (!categories[category]) categories[category] = { income: 0, expenses: 0 };
-      if (doc.type === "income") categories[category].income += amt;
-      else categories[category].expenses += amt;
-    }
-
-    const balance = income - expenses;
+    const balance = Number.isFinite(income) && Number.isFinite(expenses) ? income - expenses : 0;
     const monthName = angolaDate.toLocaleDateString('pt-AO', { month: 'long', year: 'numeric' });
 
     let message = `📊 ${monthName.charAt(0).toUpperCase() + monthName.slice(1)}
@@ -1416,11 +1408,14 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
 
 --- Por categoria:`;
 
-    for (const cat of Object.keys(categories).sort()) {
-      const c = categories[cat];
-      const catBalance = c.income - c.expenses;
+    for (const cat of categoryAgg) {
+      const catIncome = Number(cat.income) || 0;
+      const catExpense = Number(cat.expense) || 0;
+      const catBalance = Number.isFinite(catIncome) && Number.isFinite(catExpense)
+        ? catIncome - catExpense : 0;
       const signal = catBalance >= 0 ? '+' : '';
-      message += `\n${cat}: ${signal}${catBalance.toFixed(2)} Kz`;
+      const displayName = cat._id.charAt(0).toUpperCase() + cat._id.slice(1);
+      message += `\n${displayName}: ${signal}${catBalance.toFixed(2)} Kz`;
     }
 
     await reply(from, message);
