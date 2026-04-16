@@ -133,8 +133,8 @@ async function checkRateLimit(userPhone) {
   const month = String(angolaDate.getUTCMonth() + 1).padStart(2, '0'); // 0-indexed → pad
   const day = String(angolaDate.getUTCDate()).padStart(2, '0');
   const today = `${year}-${month}-${day}`;
-  // Normalize phone number for rate limiting (prevent bypass via number variation)
-  const normalizedPhone = userPhone.replace(/\D/g, ''); // Keep only digits
+  // Normalize phone number for rate limiting (hashed for privacy consistency)
+  const normalizedPhone = hashPhone(userPhone);
   const key = `${normalizedPhone}:${today}`;
   const resetAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h from now
 
@@ -184,16 +184,16 @@ function isValidWhatsAppPhone(phone) {
 
 // --- Phone Number Hashing (for privacy-compliant event storage)
 function hashPhone(phone) {
-  // 16 hex chars = 64 bits. Birthday paradox collision at ~2^32 users.
-  // For MVP scale this is safe. Increase to 32 chars (128 bits) before scaling.
-  return crypto.createHash('sha256').update(phone).digest('hex').substring(0, 16);
+  // 32 hex chars = 128 bits. Birthday paradox collision at ~2^64 unique inputs.
+  // Safe for any practical scale.
+  return crypto.createHash('sha256').update(phone).digest('hex').substring(0, 32);
 }
 
 // --- Sanitize user input before embedding in OpenAI prompt (prevent injection, limit length)
 const MAX_OPENAI_INPUT_LENGTH = 500;
 function sanitizeForPrompt(text) {
   let sanitized = text.length > MAX_OPENAI_INPUT_LENGTH ? text.substring(0, MAX_OPENAI_INPUT_LENGTH) : text;
-  sanitized = sanitized.replace(/"/g, '\\"').replace(/\n/g, ' ');
+  sanitized = sanitized.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ');
   return sanitized;
 }
 
@@ -575,10 +575,9 @@ async function logEvent(eventName, userPhone, metadata = {}) {
 const ONBOARDING_STATE_KEY = 'onboarding_state';
 
 async function isNewUser(userPhone) {
-  // Check if user has any previous transactions or events
   const userHash = hashPhone(userPhone);
-  const userEvents = await events.findOne({ user_hash: userHash });
-  return !userEvents;
+  const onboardingDoc = await db.collection('onboarding').findOne({ user_hash: userHash });
+  return !onboardingDoc;
 }
 
 async function hasGivenConsent(userPhone) {
@@ -703,6 +702,29 @@ try {
   }
 } catch (err) {
   console.error('[MIGRATE] Migration error (non-fatal):', err.message);
+}
+
+// Migration: Re-hash from 16-char to 32-char hashes
+try {
+  if (!(await isMigrationDone('hash_16_to_32'))) {
+    console.log('[MIGRATE] Checking for 16-char user_hash values...');
+    const collections = [transactions, debts, db.collection('onboarding'), db.collection('sessions')];
+    for (const collection of collections) {
+      const field = collection.collectionName === 'sessions' ? 'phone_hash' : 'user_hash';
+      const shortHashDocs = await collection.find({
+        $expr: { $eq: [{ $strLenCP: `$${field}` }, 16] }
+      }).limit(1).toArray();
+      if (shortHashDocs.length > 0) {
+        console.log(`[MIGRATE] WARNING: Found 16-char ${field} values in ${collection.collectionName}. Users with old hashes will appear as new and need to re-onboard.`);
+      }
+    }
+    await markMigrationDone('hash_16_to_32');
+    console.log('[MIGRATE] hash_16_to_32 migration check complete');
+  } else {
+    console.log('[MIGRATE] Skipping hash_16_to_32 — already done');
+  }
+} catch (err) {
+  console.error('[MIGRATE] hash_16_to_32 migration error (non-fatal):', err.message);
 }
 
 // Create indexes on sessions collection (phone_hash replaces phone for privacy)
@@ -1128,19 +1150,16 @@ app.post("/webhook", asyncHandler(async (req, res) => {
     return res.sendStatus(204);
   }
 
-  // Check if this is a new user
-  const userIsNew = await isNewUser(from);
-  if (userIsNew) {
-    await logEvent('first_use', from, { source: 'whatsapp' });
-    await setOnboardingState(from, 'awaiting_consent');
-    await sendWelcomeMessage(from);
-    return res.sendStatus(204);
-  }
+  // Parallelize: check onboarding state and load session simultaneously
+  const [onboardingState, mongoSession] = await Promise.all([
+    getOnboardingState(from),
+    getSession(from)
+  ]);
 
-  // Check onboarding state
-  const onboardingState = await getOnboardingState(from);
+  // Handle consent flow (short-circuits for non-consenting users)
   if (onboardingState === 'awaiting_consent') {
     if (text === 'sim') {
+      await logEvent('first_use', from, { source: 'whatsapp' });
       await logEvent('consent_given', from, {});
       await setOnboardingState(from, 'completed');
       await reply(from, `Perfeito! Podes começar a usar o Contador.
@@ -1154,6 +1173,14 @@ Experimenta mandar algo como:
       await reply(from, `Preciso do teu consentimento para guardar os dados. Responde "sim" para continuar.`);
       return res.sendStatus(204);
     }
+  }
+
+  // Check if this is a new user
+  const userIsNew = await isNewUser(from);
+  if (userIsNew) {
+    await setOnboardingState(from, 'awaiting_consent');
+    await sendWelcomeMessage(from);
+    return res.sendStatus(204);
   }
 
   // Log message_sent event (after consent check — only for consenting users)
@@ -1175,7 +1202,7 @@ Experimenta mandar algo como:
     processedMessages.delete(first);
   }
 
-  // Load session from MongoDB (with TTL check on in-memory cache)
+  // Load session (already fetched in parallel above)
   const sessionKey = hashPhone(from); // Use hash as key — raw phone numbers never stored in memory
   let session = sessions[sessionKey];
   let sessionDirty = false; // Track whether session state changed (reduces MongoDB writes)
@@ -1195,7 +1222,6 @@ Experimenta mandar algo como:
     session = null;
   }
   if (!session) {
-    const mongoSession = await getSession(from);
     session = mongoSession || { state: "IDLE" };
     sessions[sessionKey] = session;
   }
@@ -1733,7 +1759,7 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
   if (session.state === "AWAITING_PAGO_CONFIRM") {
     if (text === "sim") {
       await debts.updateOne(
-        { _id: session.pendingPago.debtId },
+        { _id: session.pendingPago.debtId, user_hash: userHash },
         { $set: { settled: true, settled_date: new Date() } }
       );
       const p = session.pendingPago;
@@ -1833,6 +1859,11 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
             const de = await events.deleteMany({ user_hash: userHash }, { session: mongoSession });
             await db.collection('sessions').deleteOne({ phone_hash: hashPhone(from) }, { session: mongoSession });
             await db.collection('onboarding').deleteOne({ user_hash: userHash }, { session: mongoSession });
+            // Delete rate_limits using hashed key (consistent with other collections)
+            const normalizedPhone = hashPhone(from);
+            await rateLimits.deleteMany({
+              _id: { $gte: `${normalizedPhone}:`, $lt: `${normalizedPhone}:\uffff` }
+            }, { session: mongoSession });
             deleteCounts = {
               transactions: dt.deletedCount,
               debts: dd.deletedCount,
@@ -1842,10 +1873,6 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
         } finally {
           await mongoSession.endSession();
         }
-
-        // Also delete rate_limits (uses raw phone digits, not user_hash)
-        const normalizedPhone = from.replace(/\D/g, '');
-        await rateLimits.deleteMany({ _id: { $regex: `^${normalizedPhone}:` } });
 
         // Replace the intent record with a completion record
         await db.collection('events').updateOne(
