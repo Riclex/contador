@@ -8,21 +8,11 @@ import twilio from "twilio";
 import { fileURLToPath, pathToFileURL } from "url";
 import { dirname } from "path";
 import helmet from "helmet";
+import { normalize, parseTransactionRegex, parseDebtRegex, INCOME_VERBS, EXPENSE_VERBS, DEBT_VERBS_RECEBIDO, DEBT_VERBS_DEVIDO } from './lib/parsers.js';
+import { hashPhone, sanitizeInput, isValidWhatsAppPhone, sanitizeForPrompt, MAX_OPENAI_INPUT_LENGTH, getAngolaMidnightUTC, ANGOLA_OFFSET_MS } from './lib/security.js';
+import { getCacheKey, getCachedResponse, setCachedResponse, getCacheStats } from './lib/cache.js';
 
-// --- Angola timezone helper (WAT = UTC+1, no DST)
-const ANGOLA_OFFSET_MS = 60 * 60 * 1000; // UTC+1
-
-function getAngolaMidnightUTC(date = new Date()) {
-  // Compute the UTC timestamp that corresponds to midnight in Angola
-  const angolaTime = new Date(date.getTime() + ANGOLA_OFFSET_MS);
-  return new Date(Date.UTC(
-    angolaTime.getUTCFullYear(), angolaTime.getUTCMonth(), angolaTime.getUTCDate(), 0, 0, 0
-  ) - ANGOLA_OFFSET_MS);
-}
-
-// --- Regex-based transaction parser constants
-const INCOME_VERBS = ['vendi', 'recebi', 'ganhei', 'paiei', 'biolo', 'fezada'];
-const EXPENSE_VERBS = ['comprei', 'gastei', 'paguei', 'gasto', 'pagamento', 'transferi', 'enviei'];
+// --- Angola timezone helper (imported from lib/security.js)
 
 // --- Command names (single source of truth for session reset logic)
 const COMMANDS = new Set([
@@ -162,199 +152,7 @@ async function checkRateLimit(userPhone) {
   return { allowed: true, remaining: MAX_MESSAGES_PER_USER_PER_DAY - doc.count, resetTime: doc.resetAt.getTime() };
 }
 
-// --- Input Sanitization
-function sanitizeInput(text) {
-  if (typeof text !== 'string') {
-    return '';
-  }
-  // Remove all control characters (ASCII + Unicode) and zero-width/format characters
-  return text.replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200D\uFEFF\u202A-\u202E\u2066-\u2069]/g, '');
-}
-
-// --- Text normalization (used by parsers)
-function normalize(text) {
-  return text.toLowerCase().trim();
-}
-
-// --- Phone Number Validation (prevent NoSQL injection)
-function isValidWhatsAppPhone(phone) {
-  // Must match format: whatsapp:+[country code][number]
-  return /^whatsapp:\+\d{7,15}$/.test(phone);
-}
-
-// --- Phone Number Hashing (for privacy-compliant event storage)
-function hashPhone(phone) {
-  // 32 hex chars = 128 bits. Birthday paradox collision at ~2^64 unique inputs.
-  // Safe for any practical scale.
-  return crypto.createHash('sha256').update(phone).digest('hex').substring(0, 32);
-}
-
-// --- Sanitize user input before embedding in OpenAI prompt (prevent injection, limit length)
-const MAX_OPENAI_INPUT_LENGTH = 500;
-function sanitizeForPrompt(text) {
-  let sanitized = text.length > MAX_OPENAI_INPUT_LENGTH ? text.substring(0, MAX_OPENAI_INPUT_LENGTH) : text;
-  sanitized = sanitized.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ');
-  return sanitized;
-}
-
-function parseTransactionRegex(text) {
-  const normalized = normalize(text);
-
-  // Detect type by verbs
-  let type = null;
-
-  for (const verb of INCOME_VERBS) {
-    if (normalized.includes(verb)) {
-      type = 'income';
-      break;
-    }
-  }
-
-  // Special case: transfers to own account = income (money arriving in user's account)
-  if ((normalized.includes('enviei') || normalized.includes('transferi')) && normalized.includes('minha conta')) {
-    type = 'income';
-  }
-
-  if (!type) {
-    for (const verb of EXPENSE_VERBS) {
-      if (normalized.includes(verb)) {
-        type = 'expense';
-        break;
-      }
-    }
-  }
-
-  if (!type) return { error: 'ambiguous' };
-
-  // Extract amount — prioritize currency-annotated amounts (e.g., "5000 kz") over bare numbers
-  // NOTE: [\s]\d+ in the regex allows space-separated thousands ("200 000" → 200000) but may
-  // over-match when a number is followed by an unrelated word starting with digits. The currency
-  // suffix (kz/paus) anchor prevents most false positives for the first pattern.
-  const currencyMatch = normalized.match(/(\d+(?:[\s]\d+)*)\s*(?:kz|paus)/i);
-  const amountMatch = currencyMatch || normalized.match(/(\d+(?:[\s]\d+)*)/i);
-  let amount = null;
-  if (amountMatch) {
-    amount = parseFloat(amountMatch[1].replace(/[\s]/g, ''));
-  }
-
-  if (!amount || isNaN(amount) || amount <= 0 || amount > 1_000_000_000) {
-    return { error: 'ambiguous' };
-  }
-
-  // Extract description - try multiple patterns in order
-  let description = '';
-
-  // Pattern 1: "para X" (for transfers: "transferi 200000 para Hugo")
-  const paraMatch = normalized.match(/para\s+([\w\u00C0-\u00FF]+(?:\s+[\w\u00C0-\u00FF]+)*)/iu);
-  if (paraMatch) {
-    description = normalized.includes('minha conta') ? 'transferência para conta' : `transferência para ${paraMatch[1]}`;
-  } else {
-    // Pattern 2: "de/do/da X" (e.g., "vendi 1000 de pao de trigo" → "pao de trigo")
-    const descMatch = normalized.match(/\b(?:de|do|da|dos|das)\s+(.+)$/);
-    if (descMatch) {
-      description = descMatch[1].trim();
-    } else {
-      // Pattern 3: "em X" (e.g., "gastei 1000 em compras", "recebi 500 em dinheiro")
-      const emMatch = normalized.match(/em\s+(.+)$/);
-      if (emMatch) {
-        description = emMatch[1].trim();
-      } else {
-        // Pattern 4: "com X" (e.g., "gastei 1000 com farinha")
-        const comMatch = normalized.match(/com\s+([a-zA-Z\u00C0-\u00FF][\w\u00C0-\u00FF\s]*)(?:\s|$)/);
-        if (comMatch) {
-          description = comMatch[1].trim();
-        } else {
-          // Pattern 5: direct noun after amount (e.g., "gastei 3000 farinha")
-          const directMatch = normalized.match(/\d+\s*(?:kz|paus)?\s+([a-zA-Z\u00C0-\u00FF][\w\u00C0-\u00FF\s]*)$/i);
-          if (directMatch) {
-            description = directMatch[1].trim();
-          }
-        }
-      }
-    }
-  }
-
-  return { type, amount, description };
-}
-
-// --- Regex-based debt parser constants
-const DEBT_VERBS_RECEBIDO = ['me deve', 'deve-me'];
-const DEBT_VERBS_DEVIDO = ['eu devo', 'devo', 'emprestei a'];
-
-function parseDebtRegex(text) {
-  const normalized = normalize(text);
-
-  // Helper to parse amounts with space-separated thousands (e.g., "200 000" → 200000)
-  const parseAmount = (str) => parseFloat(str.replace(/[\s]/g, ''));
-
-  // Pattern 1: "O João me deve 2000kz" or "João me deve 2000kz" - Someone owes user
-  const pattern1 = /(?:o\s+)?([\w\u00C0-\u00FF]+)\s+me\s+deve\s+(\d+(?:[\s]\d+)*)\s*(kz)?/iu;
-  const match1 = normalized.match(pattern1);
-  if (match1) {
-    return {
-      type: "recebido",
-      creditor: "user",
-      debtor: match1[1],
-      amount: parseAmount(match1[2]),
-      description: `O ${match1[1]} me deve`
-    };
-  }
-
-  // Pattern 2: "Me deve 2000 ao João" - Someone owes user (name after 'ao' or 'a')
-  const pattern2 = /me\s+deve\s+(\d+(?:[\s]\d+)*)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
-  const match2 = normalized.match(pattern2);
-  if (match2) {
-    return {
-      type: "recebido",
-      creditor: "user",
-      debtor: match2[3],
-      amount: parseAmount(match2[1]),
-      description: `Me deve ${match2[1]}`
-    };
-  }
-
-  // Pattern 3: "Eu devo 1500 a Maria" - User owes someone (name after 'ao' or 'a')
-  const pattern3 = /eu\s+devo\s+(\d+(?:[\s]\d+)*)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
-  const match3 = normalized.match(pattern3);
-  if (match3) {
-    return {
-      type: "devido",
-      creditor: match3[3],
-      debtor: "user",
-      amount: parseAmount(match3[1]),
-      description: `Eu devo ${match3[1]}`
-    };
-  }
-
-  // Pattern 4: "Devo 1500 a Maria" - User owes someone (name after 'ao' or 'a')
-  const pattern4 = /devo\s+(\d+(?:[\s]\d+)*)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
-  const match4 = normalized.match(pattern4);
-  if (match4) {
-    return {
-      type: "devido",
-      creditor: match4[3],
-      debtor: "user",
-      amount: parseAmount(match4[1]),
-      description: `Devo ${match4[1]}`
-    };
-  }
-
-  // Pattern 5: "Emprestei 500 ao João" - User lent money (expects return)
-  const pattern5 = /emprestei\s+(\d+(?:[\s]\d+)*)\s*(kz)?\s+(?:a|ao)\s+([\w\u00C0-\u00FF]+)/iu;
-  const match5 = normalized.match(pattern5);
-  if (match5) {
-    return {
-      type: "recebido",
-      creditor: "user",
-      debtor: match5[3],
-      amount: parseAmount(match5[1]),
-      description: `Emprestei ${match5[1]}`
-    };
-  }
-
-  return { error: 'ambiguous' };
-}
-
+// --- Input Sanitization (imported from lib/security.js)
 // --- Message Deduplication
 // NOTE: In-memory Set — resets on server restart. Duplicate inserts are caught by MongoDB
 // unique indexes on message_sid (error code 11000 silently ignored), so this is a performance
@@ -363,25 +161,7 @@ function parseDebtRegex(text) {
 const MAX_PROCESSED_MESSAGES = 10000;
 const processedMessages = new Set();
 
-// --- Response Cache
-// NOTE: In-memory LRU Map — resets on server restart, causing cold cache (extra OpenAI calls
-// until cache warms up). This is a performance optimization only; no correctness impact.
-// For horizontal scaling, this would need to move to a shared store (Redis or MongoDB).
-const CACHE_SIZE = 1000;
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-const responseCache = new Map();
-let cacheHits = 0;
-let cacheMisses = 0;
-
-function getCacheStats() {
-  const total = cacheHits + cacheMisses;
-  return {
-    size: responseCache.size,
-    hits: cacheHits,
-    misses: cacheMisses,
-    hitRate: total > 0 ? ((cacheHits / total) * 100).toFixed(1) + '%' : '0%'
-  };
-}
+// --- Response Cache (imported from lib/cache.js)
 
 // Admin phone numbers for /stats command - optional environment variable
 // Format: ADMIN_NUMBERS=whatsapp:+244912756717,whatsapp:+351936123127
@@ -392,39 +172,6 @@ const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS
 
 function isAdmin(phone) {
   return ADMIN_NUMBERS.includes(phone);
-}
-
-function getCacheKey(text, type) {
-  return `${type}:${text.toLowerCase().trim()}`;
-}
-
-function getCachedResponse(text, type) {
-  const key = getCacheKey(text, type);
-  const entry = responseCache.get(key);
-  if (entry && Date.now() - entry.timestamp < CACHE_TTL_MS) {
-    cacheHits++;
-    // Move to end for true LRU behavior
-    responseCache.delete(key);
-    responseCache.set(key, entry);
-    return entry.data;
-  }
-  // Remove expired entry
-  if (entry) responseCache.delete(key);
-  cacheMisses++;
-  return null;
-}
-
-function setCachedResponse(text, type, data) {
-  const key = getCacheKey(text, type);
-  // LRU eviction if cache is full
-  if (responseCache.size >= CACHE_SIZE) {
-    const firstKey = responseCache.keys().next().value;
-    responseCache.delete(firstKey);
-  }
-  responseCache.set(key, {
-    data,
-    timestamp: Date.now()
-  });
 }
 
 // --- Main module guard — server only starts when index.js is run directly, not when imported by tests
@@ -2065,19 +1812,30 @@ process.on('SIGINT', gracefulShutdown);
 
 // --- Export pure functions for testing (no server side effects when imported)
 // Note: checkRateLimit is async and requires MongoDB — not exported for unit testing
+// Re-exports from lib/ modules
 export {
+  normalize,
   parseTransactionRegex,
   parseDebtRegex,
-  normalize,
-  sanitizeInput,
-  hashPhone,
-  getCacheKey,
-  getCachedResponse,
-  setCachedResponse,
-  getCacheStats,
-  getAngolaMidnightUTC,
   INCOME_VERBS,
   EXPENSE_VERBS,
   DEBT_VERBS_RECEBIDO,
   DEBT_VERBS_DEVIDO
-};
+} from './lib/parsers.js';
+
+export {
+  hashPhone,
+  sanitizeInput,
+  isValidWhatsAppPhone,
+  sanitizeForPrompt,
+  MAX_OPENAI_INPUT_LENGTH,
+  getAngolaMidnightUTC,
+  ANGOLA_OFFSET_MS
+} from './lib/security.js';
+
+export {
+  getCacheKey,
+  getCachedResponse,
+  setCachedResponse,
+  getCacheStats
+} from './lib/cache.js';
