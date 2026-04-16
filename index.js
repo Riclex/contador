@@ -1780,17 +1780,22 @@ async function gracefulShutdown() {
   serverClosing = true;
   console.log('Shutting down gracefully...');
 
-  server.close(); // Stop accepting new connections, drain in-flight requests
+  // Stop accepting new connections, wait for in-flight requests to drain
+  server.close(async () => {
+    try {
+      await mongo.close();
+      console.log('MongoDB connection closed');
+    } catch (err) {
+      console.error('Error closing MongoDB:', err.message);
+    }
+    process.exit(0);
+  });
 
-  try {
-    // Close MongoDB connection
-    await mongo.close();
-    console.log('MongoDB connection closed');
-  } catch (err) {
-    console.error('Error closing MongoDB:', err.message);
-  }
-
-  process.exit(0);
+  // Force exit after 10s if in-flight requests don't drain
+  setTimeout(() => {
+    console.error('Forced shutdown after 10s timeout');
+    process.exit(1);
+  }, 10000);
 }
 
 process.on('SIGTERM', gracefulShutdown);
