@@ -163,17 +163,6 @@ const processedMessages = new Set();
 
 // --- Response Cache (imported from lib/cache.js)
 
-// Admin phone numbers for /stats command - optional environment variable
-// Format: ADMIN_NUMBERS=whatsapp:+244912756717,whatsapp:+351936123127
-// Falls back to hardcoded defaults if not set
-const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS
-  ? process.env.ADMIN_NUMBERS.split(',').map(s => s.trim())
-  : ['whatsapp:+244912756717', 'whatsapp:+351936123127'];
-
-function isAdmin(phone) {
-  return ADMIN_NUMBERS.includes(phone);
-}
-
 // --- Main module guard — server only starts when index.js is run directly, not when imported by tests
 const __filename = fileURLToPath(import.meta.url);
 const isMainModule = pathToFileURL(process.argv[1] || '').href === import.meta.url;
@@ -194,11 +183,19 @@ app.use(bodyParser.urlencoded({
 }));
 
 // --- Environment Validation
-const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"];
+const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "WEBHOOK_URL", "ADMIN_NUMBERS"];
 const missing = requiredEnvVars.filter((key) => !process.env[key]);
 if (missing.length > 0) {
   console.error(`Missing required environment variables: ${missing.join(", ")}`);
   process.exit(1);
+}
+
+// Admin phone numbers for /stats command - required environment variable
+// Format: ADMIN_NUMBERS=whatsapp:+244912756717,whatsapp:+351936123127
+const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS.split(',').map(s => s.trim());
+
+function isAdmin(phone) {
+  return ADMIN_NUMBERS.includes(phone);
 }
 
 // --- Clients
@@ -851,12 +848,8 @@ app.post("/webhook", asyncHandler(async (req, res) => {
     return res.status(401).send('Missing signature');
   }
 
-  // Support Railway/reverse proxy forwarded headers
-  // Prefer configured WEBHOOK_URL to avoid fragile header-based URL reconstruction
-  const configuredUrl = process.env.WEBHOOK_URL;
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-  const host = req.headers['x-forwarded-host'] || req.get('host');
-  const url = configuredUrl || `${protocol}://${host}/webhook`;
+  // WEBHOOK_URL is required — no fragile header-based URL reconstruction
+  const url = process.env.WEBHOOK_URL;
 
   // Use Twilio's official validateRequest function
   const isValid = twilio.validateRequest(
