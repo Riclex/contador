@@ -22,7 +22,7 @@ function getAngolaMidnightUTC(date = new Date()) {
 
 // --- Regex-based transaction parser constants
 const INCOME_VERBS = ['vendi', 'recebi', 'ganhei', 'paiei', 'biolo', 'fezada'];
-const EXPENSE_VERBS = ['comprei', 'gastei', 'paguei', 'gasto', 'pagamento', 'emprestei', 'transferi', 'enviei'];
+const EXPENSE_VERBS = ['comprei', 'gastei', 'paguei', 'gasto', 'pagamento', 'transferi', 'enviei'];
 
 // --- Command names (single source of truth for session reset logic)
 const COMMANDS = new Set([
