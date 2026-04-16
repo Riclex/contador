@@ -15,7 +15,7 @@ This is a single-file Express.js application with a simple architecture:
 - **LLM Parsing**: OpenAI GPT-4o-mini for extracting transaction/debt details from Portuguese text (fallback only)
 - **Regex Parsing**: Fast, cost-free parser handling standard patterns:
   - Income: vendi, recebi, ganhei, paiei, biolo, fezada
-  - Expense: comprei, gastei, paguei, gasto, pagamento, emprestei, transferi, enviei
+  - Expense: comprei, gastei, paguei, gasto, pagamento, transferi, enviei
   - Debt: "X me deve", "eu devo", "devo", "emprestei a"
   - Description extraction: "de/do/da X", "para X", "em X" (e.g., "gastei 1000 em compras")
 - **Messaging**: Twilio WhatsApp API for user communication
@@ -138,7 +138,7 @@ This is a single-file Express.js application with a simple architecture:
 - **Multi-word `em` Descriptions (P2-1)**: Regex `em\s+(.+?)` (lazy) changed to `em\s+(.+)$` (greedy) — multi-word descriptions like "material escolar" no longer truncated
 - **Empty-string Creditor/Debtor Validation (P2-2)**: Added `.trim().length > 0` check on creditor and debtor strings to prevent OpenAI from inserting empty names
 - **/apagar Error Feedback (P2-3)**: MongoDB transaction failure now sends WhatsApp error message instead of silently returning 500
-- **PRIVACY.md Accuracy (P3-1)**: Corrected SHA-256 claim to note that rate_limits uses normalized phone digits; corrected atomic deletion claim to note rate_limits runs outside the transaction
+- **PRIVACY.md Accuracy (P3-1)**: Corrected to note that rate_limits uses hashed phone (consistent with all other collections); corrected atomic deletion claim to note rate_limits runs inside the transaction
 
 ## Environment Variables
 

@@ -12,7 +12,7 @@ O **Contador** é um assistente financeiro via WhatsApp que permite aos usuário
 
 | Dado | Finalidade | Base Legal |
 |------|------------|------------|
-| **Número de telefone WhatsApp** (armazenado com hash SHA-256 nas coleções de transações, dívidas, eventos, sessões e onboarding; armazenado em formato normalizado sem hash apenas na coleção de limitação de uso para composição da chave diária) | Identificação única do usuário | Consentimento |
+| **Número de telefone WhatsApp** (armazenado com hash SHA-256 em todas as coleções, incluindo limitação de uso) | Identificação única do usuário / Prevenção de abuso | Consentimento / Interesse legítimo (limitação de uso) |
 | **Transações** (vendas, gastos, descrições) | Fornecer resumos de saldo e histórico | Consentimento |
 | **Dívidas** (credor, devedor, valores, descrições) | Rastrear e gerenciar dívidas | Consentimento |
 | **Eventos de auditoria** (primeiro uso, consentimento, mensagens enviadas) | Compliance e segurança | Legítimo interesse |
@@ -126,7 +126,7 @@ Estas transferências são necessárias para a prestação do serviço e contam 
 | Comando | Ação |
 |---------|------|
 | `/meusdados` | Visualizar todos os dados armazenados |
-| `/apagar` | Deletar permanentemente todos os dados (de forma atômica para transações, dívidas e eventos; registos de limitação de uso são eliminados separadamente) |
+| `/apagar` | Deletar permanentemente todos os dados de forma atômica (incluindo registos de limitação de uso) |
 
 ### 7.2 Contato com a Administração
 
