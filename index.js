@@ -9,18 +9,19 @@ import { fileURLToPath, pathToFileURL } from "url";
 import { dirname } from "path";
 import helmet from "helmet";
 import { normalize, parseTransactionRegex, parseDebtRegex, INCOME_VERBS, EXPENSE_VERBS, DEBT_VERBS_RECEBIDO, DEBT_VERBS_DEVIDO } from './lib/parsers.js';
-import { hashPhone, sanitizeInput, isValidWhatsAppPhone, sanitizeForPrompt, MAX_OPENAI_INPUT_LENGTH, getAngolaMidnightUTC, ANGOLA_OFFSET_MS } from './lib/security.js';
+import { hashPhone, sanitizeInput, isValidWhatsAppPhone, sanitizeForPrompt, MAX_OPENAI_INPUT_LENGTH, getAngolaMidnightUTC, ANGOLA_OFFSET_MS, MAX_AMOUNT, isAffirmative, isNegative, isConfirmationWord, formatKz } from './lib/security.js';
 import { getCacheKey, getCachedResponse, setCachedResponse, getCacheStats } from './lib/cache.js';
 
 // --- Angola timezone helper (imported from lib/security.js)
 
 // --- Command names (single source of truth for session reset logic)
 const COMMANDS = new Set([
-  'hoje', '/quemedeve', '/quemdevo', '/kilapi', '/stats',
+  'hoje', '/hoje', '/quemedeve', '/quemdevo', '/kilapi', '/stats',
   'ajuda', '/ajuda', 'comandos', '/comandos',
   'privacidade', '/privacidade', 'termos', '/termos',
   'meusdados', '/meusdados', 'apagar', '/apagar',
-  'resumo', '/resumo', 'mes', '/mes'
+  'resumo', '/resumo', 'mes', '/mes',
+  'desfazer', '/desfazer'
 ]);
 
 // --- Session and Onboarding State Enums (prevent typos creating dead-end states) ---
@@ -31,6 +32,7 @@ const SessionState = Object.freeze({
   AWAITING_DEBTOR_NAME: 'AWAITING_DEBTOR_NAME',
   AWAITING_PAGO_CONFIRM: 'AWAITING_PAGO_CONFIRM',
   AWAITING_APAGAR_CONFIRM: 'AWAITING_APAGAR_CONFIRM',
+  AWAITING_DESFAZER_CONFIRM: 'AWAITING_DESFAZER_CONFIRM',
 });
 
 const OnboardingState = Object.freeze({
@@ -39,16 +41,25 @@ const OnboardingState = Object.freeze({
 });
 
 // --- Debt Name Validation (applied consistently to OpenAI, regex, and user-provided names) ---
+const RESERVED_DEBT_NAMES = new Set([
+  'sim', 's', 'si', 'ya', 'ep', 'isso', 'claro', 'confirmo',
+  'nao', 'não', 'n', 'na', 'nop', 'cancela', 'cancelar', 'ok'
+]);
+
 function isValidDebtName(name) {
-  return typeof name === 'string' &&
-    name.trim().length > 0 && name.trim().length <= 30 &&
-    /^[a-zA-Z\u00C0-\u00FF\s]+$/.test(name.trim());
+  if (typeof name !== 'string') return false;
+  const trimmed = name.trim();
+  if (trimmed.length === 0 || trimmed.length > 30) return false;
+  if (!/^[a-zA-Z\u00C0-\u00FF\s]+$/.test(trimmed)) return false;
+  if (RESERVED_DEBT_NAMES.has(trimmed.toLowerCase())) return false;
+  return true;
 }
 
 // --- Rate Limiting (MongoDB-backed, persists across restarts)
 const MAX_MESSAGES_PER_USER_PER_DAY = 50;
 let rateLimits = null; // MongoDB collection — initialized during startup
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes (used by both app logic and MongoDB TTL index)
+const MAX_WHATSAPP_CHARS = 1500; // WhatsApp message length safety limit
 const processingUsers = new Set(); // Per-user lock to prevent concurrent webhook processing
 
 // --- Stats Cache (5 minute TTL)
@@ -194,11 +205,11 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-// Admin phone numbers for /stats command (optional, defaults provided)
+// Admin phone numbers for /stats command (required, no defaults)
 // Format: ADMIN_NUMBERS=whatsapp:+244912756717,whatsapp:+351936123127
 const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS
   ? process.env.ADMIN_NUMBERS.split(',').map(s => s.trim())
-  : ['whatsapp:+244912756717', 'whatsapp:+351936123127'];
+  : [];
 
 function isAdmin(phone) {
   return ADMIN_NUMBERS.includes(phone);
@@ -283,6 +294,14 @@ try {
   );
 } catch (err) { if (err.code !== 86) throw err; }
 
+// Auto-delete stale data_deletion_started records after 7 days (crash recovery markers)
+try {
+  await events.createIndex(
+    { timestamp: 1 },
+    { expireAfterSeconds: 7 * 24 * 60 * 60, partialFilterExpression: { event_name: 'data_deletion_started' } }
+  );
+} catch (err) { if (err.code !== 86) throw err; }
+
 // --- Migration Guard — prevent redundant migrations on every startup
 async function isMigrationDone(name) {
   const doc = await db.collection('_migrations').findOne({ _id: name });
@@ -324,12 +343,6 @@ async function logEvent(eventName, userPhone, metadata = {}) {
 // --- User Onboarding
 const ONBOARDING_STATE_KEY = 'onboarding_state';
 
-async function isNewUser(userPhone) {
-  const userHash = hashPhone(userPhone);
-  const onboardingDoc = await db.collection('onboarding').findOne({ user_hash: userHash });
-  return !onboardingDoc;
-}
-
 async function hasGivenConsent(userPhone) {
   const userHash = hashPhone(userPhone);
   const userEvents = await events.findOne({
@@ -354,7 +367,7 @@ Exemplos:
 
 Aceitas que guardemos os teus dados para fazer os cálculos? Responde "sim" para continuar.`;
 
-  await reply(userPhone, welcomeMessage);
+  await replyWithRetry(userPhone, welcomeMessage);
 }
 
 async function setOnboardingState(userPhone, state) {
@@ -369,7 +382,7 @@ async function setOnboardingState(userPhone, state) {
 async function getOnboardingState(userPhone) {
   const userHash = hashPhone(userPhone);
   const doc = await db.collection('onboarding').findOne({ user_hash: userHash });
-  return doc?.state || OnboardingState.COMPLETED;
+  return doc?.state || null;
 }
 
 // Create indexes on debts collection (user_hash replaces user_phone for privacy)
@@ -594,7 +607,7 @@ Output: {'error':'ambiguous'}\
 Input: 'Pus saldo'\
 Output: {'error':'ambiguous'}\
 Input: 'Emprestei 500 kz'\
-Output: {'type':'expense','amount':500,'description':'divida'}\
+Output: {'error':'ambiguous'}\
 Input: 'Fezade de 3000 kz'\
 Output: {'type':'income','amount':3000,'description':'fezada'}\
 Input: 'Biolo 2500 kz'\
@@ -670,6 +683,10 @@ async function parseDebtOpenAI(text) {
   if (result.error) return result;
   if (!result.type || !result.creditor || !result.debtor || typeof result.amount !== 'number') {
     console.error('[OpenAI] Malformed debt response:', JSON.stringify(result));
+    return { error: 'ambiguous' };
+  }
+  if (result.amount <= 0 || result.amount > MAX_AMOUNT) {
+    console.error('[OpenAI] Debt amount out of range:', result.amount);
     return { error: 'ambiguous' };
   }
   return result;
@@ -773,6 +790,10 @@ async function parseTransaction(text) {
   if (result.error) return result;
   if (!result.type || typeof result.amount !== 'number') {
     console.error('[OpenAI] Malformed transaction response:', JSON.stringify(result));
+    return { error: 'ambiguous' };
+  }
+  if (result.amount <= 0 || result.amount > MAX_AMOUNT) {
+    console.error('[OpenAI] Transaction amount out of range:', result.amount);
     return { error: 'ambiguous' };
   }
   setCachedResponse(text, 'transaction', result);
@@ -896,11 +917,11 @@ app.post("/webhook", asyncHandler(async (req, res) => {
 
   // Handle consent flow (short-circuits for non-consenting users)
   if (onboardingState === OnboardingState.AWAITING_CONSENT) {
-    if (text === 'sim') {
+    if (isAffirmative(text)) {
       await logEvent('first_use', from, { source: 'whatsapp' });
       await logEvent('consent_given', from, {});
       await setOnboardingState(from, OnboardingState.COMPLETED);
-      await reply(from, `Perfeito! Podes começar a usar o Contador.
+      await replyWithRetry(from, `Perfeito! Podes começar a usar o Contador.
 
 Experimenta mandar algo como:
 • "vendi 5000 de pão"
@@ -908,14 +929,13 @@ Experimenta mandar algo como:
 • "hoje" (para ver o saldo)`);
       return res.sendStatus(204);
     } else {
-      await reply(from, `Preciso do teu consentimento para guardar os dados. Responde "sim" para continuar.`);
+      await replyWithRetry(from, `Preciso do teu consentimento para guardar os dados. Responde "sim" para continuar.`);
       return res.sendStatus(204);
     }
   }
 
-  // Check if this is a new user
-  const userIsNew = await isNewUser(from);
-  if (userIsNew) {
+  // Check if this is a new user (onboardingState is null when no record exists)
+  if (onboardingState === null) {
     await setOnboardingState(from, OnboardingState.AWAITING_CONSENT);
     await sendWelcomeMessage(from);
     return res.sendStatus(204);
@@ -970,9 +990,10 @@ Experimenta mandar algo como:
   }
 
   // Reset session if user typed a command during an active confirmation flow
-  if (session.state !== SessionState.IDLE && text !== "sim" && text !== "nao" && text !== "não") {
+  if (session.state !== SessionState.IDLE && !isConfirmationWord(text)) {
     const isCommand = COMMANDS.has(text) || /^\/\w+\s+/.test(text);
     if (isCommand) {
+      await reply(from, "Operação cancelada.");
       markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
       await saveSessionIfDirty();
       session = sessions[sessionKey];
@@ -980,7 +1001,7 @@ Experimenta mandar algo como:
   }
 
   // Command: hoje
-  if (text === "hoje") {
+  if (text === "hoje" || text === "/hoje") {
     await logEvent('command_used', from, { command: 'hoje' });
 
     const utcStart = getAngolaMidnightUTC();
@@ -998,7 +1019,7 @@ Experimenta mandar algo como:
     const expense = Number(aggResult[0]?.expense) || 0;
     const total = Number.isFinite(income) && Number.isFinite(expense) ? income - expense : 0;
 
-    await replyWithRetry(from, `Total de hoje: ${total} Kz`);
+    await replyWithRetry(from, `Total de hoje: ${formatKz(total)} Kz`);
     return res.sendStatus(204);
   }
 
@@ -1024,9 +1045,10 @@ Experimenta mandar algo como:
     for (const d of docs) {
       const amt = Number(d.amount);
       if (!Number.isFinite(amt)) continue;
-      message += `- ${d.debtor}: ${amt} Kz\n`;
+      message += `- ${d.debtor}: ${formatKz(amt)} Kz\n`;
     }
     if (docs.length === pageSize) message += `\n(mostrando ${pageSize} por página, /quemedeve ${page + 1} para mais)`;
+    if (message.length > MAX_WHATSAPP_CHARS) message = message.substring(0, MAX_WHATSAPP_CHARS);
     await replyWithRetry(from, message);
     return res.sendStatus(204);
   }
@@ -1053,9 +1075,10 @@ Experimenta mandar algo como:
     for (const d of docs) {
       const amt = Number(d.amount);
       if (!Number.isFinite(amt)) continue;
-      message += `- ${d.creditor}: ${amt} Kz\n`;
+      message += `- ${d.creditor}: ${formatKz(amt)} Kz\n`;
     }
     if (docs.length === pageSize) message += `\n(mostrando ${pageSize} por página, /quemdevo ${page + 1} para mais)`;
+    if (message.length > MAX_WHATSAPP_CHARS) message = message.substring(0, MAX_WHATSAPP_CHARS);
     await replyWithRetry(from, message);
     return res.sendStatus(204);
   }
@@ -1082,12 +1105,13 @@ Experimenta mandar algo como:
       const amt = Number(d.amount);
       if (!Number.isFinite(amt)) continue;
       if (d.type === "recebido") {
-        message += `- ${d.debtor} te deve: ${amt} Kz\n`;
+        message += `- ${d.debtor} te deve: ${formatKz(amt)} Kz\n`;
       } else {
-        message += `- Tu deves a ${d.creditor}: ${amt} Kz\n`;
+        message += `- Tu deves a ${d.creditor}: ${formatKz(amt)} Kz\n`;
       }
     }
     if (docs.length === pageSize) message += `\n(mostrando ${pageSize} por página, /kilapi ${page + 1} para mais)`;
+    if (message.length > MAX_WHATSAPP_CHARS) message = message.substring(0, MAX_WHATSAPP_CHARS);
     await replyWithRetry(from, message);
     return res.sendStatus(204);
   }
@@ -1097,19 +1121,36 @@ Experimenta mandar algo como:
   if (pagoMatch) {
     await logEvent('command_used', from, { command: 'pago' });
     const name = pagoMatch[1].trim();
-    // Exact match on pre-normalized lowercase fields (index-friendly)
+    // Prefix match on pre-normalized lowercase fields
     const nameLower = name.toLowerCase();
+    const escapedName = nameLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const nameRegex = new RegExp(`^${escapedName}`);
     const doc = await debts.findOne({
       user_hash: userHash,
       settled: { $ne: true },
       $or: [
-        { creditor_lower: nameLower },
-        { debtor_lower: nameLower }
+        { creditor_lower: nameRegex },
+        { debtor_lower: nameRegex }
       ]
     }, { sort: { date: 1 } });
 
     if (!doc) {
-      await reply(from, "Não encontrei esta dívida. Use /kilapi para ver as dívidas ativas.");
+      // Fallback: list active debt counterparties so user can pick the right name
+      const activeDebts = await debts.find({
+        user_hash: userHash,
+        settled: { $ne: true }
+      }).sort({ date: -1 }).limit(20).toArray();
+      if (activeDebts.length === 0) {
+        await reply(from, "Não tens dívidas ativas.");
+      } else {
+        const names = new Set();
+        for (const d of activeDebts) {
+          if (d.creditor && d.creditor !== 'user') names.add(d.creditor);
+          if (d.debtor && d.debtor !== 'user') names.add(d.debtor);
+        }
+        const nameList = [...names].slice(0, 10).join(', ');
+        await reply(from, `Não encontrei esta dívida. Nomes ativos: ${nameList}\nUse /kilapi para ver todas.`);
+      }
       return res.sendStatus(204);
     }
 
@@ -1117,7 +1158,7 @@ Experimenta mandar algo como:
     const totalDebts = await debts.countDocuments({
       user_hash: userHash,
       settled: { $ne: true },
-      $or: [{ creditor_lower: nameLower }, { debtor_lower: nameLower }]
+      $or: [{ creditor_lower: nameRegex }, { debtor_lower: nameRegex }]
     });
     const extraDebts = totalDebts - 1;
 
@@ -1129,12 +1170,16 @@ Experimenta mandar algo como:
     await saveSessionIfDirty();
     const who = doc.type === "recebido" ? `${doc.debtor} te deve` : `tu deves a ${doc.creditor}`;
     const suffix = extraDebts > 0 ? ` (mais ${extraDebts} dívida${extraDebts > 1 ? 's' : ''})` : '';
-    await reply(from, `Marcar como paga: ${who} ${doc.amount} Kz${suffix}?\nResponde: Sim ou Não`);
+    await reply(from, `Marcar como paga: ${who} ${formatKz(doc.amount)} Kz${suffix}?\nResponde: Sim ou Não`);
     return res.sendStatus(204);
   }
 
   // Command: /stats - Admin only statistics
   if (text === "/stats") {
+    if (ADMIN_NUMBERS.length === 0) {
+      await reply(from, "Comando desativado.");
+      return res.sendStatus(204);
+    }
     if (!isAdmin(from)) {
       await reply(from, "Comando reservado para administradores.");
       return res.sendStatus(204);
@@ -1183,11 +1228,16 @@ Sistema:
 • "João me deve 2000" ou "fezada de 3000"
 • "eu devo 1000 a Maria"
 
+↩️ DESFAZER:
+• /desfazer - Apagar último registo
+
 🔒 PRIVACIDADE:
 • /meusdados - Ver teus dados
 • /apagar - Apagar tudo
 • /privacidade - Política de privacidade
-• /termos - Termos de uso`;
+• /termos - Termos de uso
+
+💡 Podes responder Sim, Ya, S ou Não, N para confirmar/cancelar.`;
     await reply(from, helpMessage);
     return res.sendStatus(204);
   }
@@ -1262,16 +1312,19 @@ Termos completos: https://riclex.github.io/contador/TERMS.html`;
 
 📊 RESUMO:
 • Transações: ${userTransactions.length}${totalTransactions > 100 ? ` (últimas 100 de ${totalTransactions})` : ''}
-• Receitas: ${totalIncome.toFixed(2)} Kz
-• Despesas: ${totalExpenses.toFixed(2)} Kz
-• Saldo: ${(totalIncome - totalExpenses).toFixed(2)} Kz
+• Receitas: ${formatKz(totalIncome)} Kz
+• Despesas: ${formatKz(totalExpenses)} Kz
+• Saldo: ${formatKz(totalIncome - totalExpenses)} Kz
 • Dívidas ativas: ${activeDebts}
 
 🔒 EVENTOS (auditoria):
 • Total: ${totalEvents}${totalEvents > 100 ? ' (últimos 100)' : ''}
 
 Para apagar todos os teus dados: /apagar`;
-    await replyWithRetry(from, message);
+    const safeMessage = message.length > MAX_WHATSAPP_CHARS
+      ? message.substring(0, MAX_WHATSAPP_CHARS)
+      : message;
+    await replyWithRetry(from, safeMessage);
     return res.sendStatus(204);
   }
 
@@ -1304,6 +1357,44 @@ Esta ação é PERMANENTE e não pode ser desfeita.
 
 Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
     await reply(from, message);
+    return res.sendStatus(204);
+  }
+
+  // Command: desfazer - Undo last transaction or debt
+  if (text === "desfazer" || text === "/desfazer") {
+    await logEvent('command_used', from, { command: 'desfazer' });
+
+    // Find the most recent record across transactions and debts (including settled debts for /pago undo)
+    const lastTransaction = await transactions.find({ user_hash: userHash })
+      .sort({ date: -1 }).limit(1).toArray();
+    const lastDebt = await debts.find({ user_hash: userHash })
+      .sort({ date: -1 }).limit(1).toArray();
+
+    const txDate = lastTransaction.length > 0 ? lastTransaction[0].date : null;
+    const debtDate = lastDebt.length > 0 ? lastDebt[0].date : null;
+
+    if (!txDate && !debtDate) {
+      await reply(from, "Não tens registos para desfazer.");
+      return res.sendStatus(204);
+    }
+
+    let pendingDesfazer;
+    if (!debtDate || (txDate && txDate > debtDate)) {
+      const t = lastTransaction[0];
+      pendingDesfazer = { type: 'transaction', id: t._id, detail: `${t.type === 'income' ? 'entrada' : 'saída'} de ${formatKz(t.amount)} Kz` };
+    } else {
+      const d = lastDebt[0];
+      const who = d.type === 'recebido' ? `${d.debtor} te deve` : `tu deves a ${d.creditor}`;
+      const settledLabel = d.settled ? ' (paga)' : '';
+      pendingDesfazer = { type: 'debt', id: d._id, detail: `dívida: ${who} ${formatKz(d.amount)} Kz${settledLabel}` };
+    }
+
+    markSessionDirty(); sessions[sessionKey] = {
+      state: SessionState.AWAITING_DESFAZER_CONFIRM,
+      pendingDesfazer
+    };
+    await saveSessionIfDirty();
+    await reply(from, `Desfazer o último registo?\n${pendingDesfazer.detail}\nResponde: Sim ou Não`);
     return res.sendStatus(204);
   }
 
@@ -1350,9 +1441,9 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
 
     let message = `📊 Resumo (Últimos 7 dias)
 
-💰 Entradas: ${income.toFixed(2)} Kz
-💸 Saídas: ${expenses.toFixed(2)} Kz
-📈 Saldo: ${balance.toFixed(2)} Kz
+💰 Entradas: ${formatKz(income)} Kz
+💸 Saídas: ${formatKz(expenses)} Kz
+📈 Saldo: ${formatKz(balance)} Kz
 
 --- Por dia:`;
 
@@ -1362,7 +1453,7 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
       const dayBalance = Number.isFinite(dayIncome) && Number.isFinite(dayExpense)
         ? dayIncome - dayExpense : 0;
       const signal = dayBalance >= 0 ? '+' : '';
-      message += `\n${day._id}: ${signal}${dayBalance.toFixed(2)} Kz`;
+      message += `\n${day._id}: ${signal}${formatKz(dayBalance)} Kz`;
     }
 
     await replyWithRetry(from, message);
@@ -1418,9 +1509,9 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
 
     let message = `📊 ${monthName.charAt(0).toUpperCase() + monthName.slice(1)}
 
-💰 Entradas: ${income.toFixed(2)} Kz
-💸 Saídas: ${expenses.toFixed(2)} Kz
-📈 Saldo: ${balance.toFixed(2)} Kz
+💰 Entradas: ${formatKz(income)} Kz
+💸 Saídas: ${formatKz(expenses)} Kz
+📈 Saldo: ${formatKz(balance)} Kz
 
 --- Por categoria:`;
 
@@ -1431,7 +1522,7 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
         ? catIncome - catExpense : 0;
       const signal = catBalance >= 0 ? '+' : '';
       const displayName = cat._id.charAt(0).toUpperCase() + cat._id.slice(1);
-      message += `\n${displayName}: ${signal}${catBalance.toFixed(2)} Kz`;
+      message += `\n${displayName}: ${signal}${formatKz(catBalance)} Kz`;
     }
 
     await replyWithRetry(from, message);
@@ -1442,9 +1533,9 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
   switch (session.state) {
 
   case SessionState.AWAITING_CONFIRMATION: {
-    if (text === "sim") {
+    if (isAffirmative(text)) {
       const amount = Number(session.pending.amount);
-      if (!Number.isFinite(amount) || amount <= 0 || amount > 1_000_000_000) {
+      if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) {
         await reply(from, "Valor inválido. Tenta novamente.");
         markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
         await saveSessionIfDirty();
@@ -1469,25 +1560,22 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
       markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
       await saveSessionIfDirty();
       return res.sendStatus(204);
-    } else if (text === "nao" || text === "não") {
+    } else if (isNegative(text)) {
       await reply(from, "Cancelado.");
       markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
       await saveSessionIfDirty();
       return res.sendStatus(204);
     } else {
-      // Cancel pending, but try to parse the new input
-      await reply(from, "Cancelado.");
-      markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
-      await saveSessionIfDirty();
-      // Fall through to parse the new input
+      await reply(from, "Não entendi. Responde Sim ou Não.");
+      return res.sendStatus(204);
     }
     break;
   }
 
   case SessionState.AWAITING_DEBT_CONFIRMATION: {
-    if (text === "sim") {
+    if (isAffirmative(text)) {
       const amount = Number(session.pendingDebt.amount);
-      if (!Number.isFinite(amount) || amount <= 0 || amount > 1_000_000_000) {
+      if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) {
         await reply(from, "Valor inválido. Tenta novamente.");
         markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
         await saveSessionIfDirty();
@@ -1519,38 +1607,37 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
       markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
       await saveSessionIfDirty();
       return res.sendStatus(204);
-    } else if (text === "nao" || text === "não") {
+    } else if (isNegative(text)) {
       await reply(from, "Cancelado.");
       markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
       await saveSessionIfDirty();
       return res.sendStatus(204);
     } else {
-      // Cancel pending, but try to parse the new input
-      await reply(from, "Cancelado.");
-      markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
-      await saveSessionIfDirty();
-      // Fall through to parse the new input
+      await reply(from, "Não entendi. Responde Sim ou Não.");
+      return res.sendStatus(204);
     }
     break;
   }
 
   case SessionState.AWAITING_PAGO_CONFIRM: {
-    if (text === "sim") {
+    if (isAffirmative(text)) {
       await debts.updateOne(
         { _id: session.pendingPago.debtId, user_hash: userHash },
         { $set: { settled: true, settled_date: new Date() } }
       );
       const p = session.pendingPago;
       const who = p.type === "recebido" ? `${p.debtor} te deve` : `tu deves a ${p.creditor}`;
-      await replyWithRetry(from, `Dívida de ${who} ${p.amount} Kz marcada como paga.`);
+      await replyWithRetry(from, `Dívida de ${who} ${formatKz(p.amount)} Kz marcada como paga.`);
 
-      // Check for remaining debts with same name
+      // Check for remaining debts with same name (prefix match)
       const nameLower = p.name.toLowerCase();
+      const escapedName = nameLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const nameRegex = new RegExp(`^${escapedName}`);
       const remaining = await debts.countDocuments({
         user_hash: userHash,
         settled: { $ne: true },
         _id: { $ne: p.debtId },
-        $or: [{ creditor_lower: nameLower }, { debtor_lower: nameLower }]
+        $or: [{ creditor_lower: nameRegex }, { debtor_lower: nameRegex }]
       });
       if (remaining > 0) {
         await reply(from, `Mais ${remaining} dívida(s) com este nome. Manda /pago ${p.name} de novo.`);
@@ -1558,17 +1645,14 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
       markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
       await saveSessionIfDirty();
       return res.sendStatus(204);
-    } else if (text === "nao" || text === "não") {
+    } else if (isNegative(text)) {
       await reply(from, "Operação cancelada.");
       markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
       await saveSessionIfDirty();
       return res.sendStatus(204);
     } else {
-      // Cancel pending, but try to parse the new input
-      await reply(from, "Operação cancelada.");
-      markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
-      await saveSessionIfDirty();
-      // Fall through to parse the new input
+      await reply(from, "Não entendi. Responde Sim ou Não.");
+      return res.sendStatus(204);
     }
     break;
   }
@@ -1576,7 +1660,7 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
   case SessionState.AWAITING_DEBTOR_NAME: {
     const pendingDebt = session.pendingDebt;
 
-    if (text === "nao" || text === "não") {
+    if (isNegative(text)) {
       await reply(from, "Cancelado.");
       markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
       await saveSessionIfDirty();
@@ -1594,16 +1678,30 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
       return res.sendStatus(204);
     }
 
+    // Reject reserved confirmation keywords as debt names (e.g., "sim", "nao")
+    if (!isValidDebtName(name)) {
+      await reply(from, "Nome inválido. Usa só letras e espaços (máximo 30 caracteres).");
+      markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
+      await saveSessionIfDirty();
+      return res.sendStatus(204);
+    }
+
     // For "recebido" (someone owes user): debtor="user" (unknown), need debtor name
     if (pendingDebt.type === "recebido" && pendingDebt.debtor === "user") {
       pendingDebt.debtor = name;
     // For "devido" (user owes someone): creditor="user" (unknown), need creditor name
     } else if (pendingDebt.type === "devido" && pendingDebt.creditor === "user") {
       pendingDebt.creditor = name;
+    } else {
+      console.error(`[SESSION] AWAITING_DEBTOR_NAME reached with invalid state: type=${pendingDebt.type}, debtor=${pendingDebt.debtor}, creditor=${pendingDebt.creditor}`);
+      await reply(from, "Erro interno. Tenta novamente.");
+      markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
+      await saveSessionIfDirty();
+      return res.sendStatus(204);
     }
 
     const amount = Number(pendingDebt.amount);
-    if (!Number.isFinite(amount) || amount <= 0 || amount > 1_000_000_000) {
+    if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_AMOUNT) {
       await reply(from, "Valor inválido. Tenta novamente.");
       markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
       await saveSessionIfDirty();
@@ -1617,13 +1715,13 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
     };
     await saveSessionIfDirty();
     const who = pendingDebt.type === "recebido" ? `${name} te deve` : `tu deves a ${name}`;
-    await reply(from, `Registar que ${who} ${pendingDebt.amount} Kz?\nResponde: Sim ou Não`);
+    await reply(from, `Registar que ${who} ${formatKz(pendingDebt.amount)} Kz?\nResponde: Sim ou Não`);
     return res.sendStatus(204);
     break;
   }
 
   case SessionState.AWAITING_APAGAR_CONFIRM: {
-    if (text === "sim") {
+    if (isAffirmative(text)) {
       // Record erasure intent first — if process crashes mid-deletion, this proves the request existed
       // Use a double-hash so the audit record cannot be linked back to the original phone number
       const auditId = crypto.randomUUID();
@@ -1684,11 +1782,40 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
         markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
         await saveSessionIfDirty();
       }
-    } else {
+    } else if (isNegative(text)) {
       await reply(from, "Operação cancelada. Os teus dados permanecem armazenados.");
       markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
       await saveSessionIfDirty();
+    } else {
+      await reply(from, "Não entendi. Responde Sim ou Não.");
     }
+    return res.sendStatus(204);
+    break;
+  }
+
+  case SessionState.AWAITING_DESFAZER_CONFIRM: {
+    if (isAffirmative(text)) {
+      const pendingDesfazer = session.pendingDesfazer;
+      try {
+        if (pendingDesfazer.type === 'transaction') {
+          await transactions.deleteOne({ _id: pendingDesfazer.id, user_hash: userHash });
+          await logEvent('transaction_undone', from, { type: pendingDesfazer.type });
+        } else if (pendingDesfazer.type === 'debt') {
+          await debts.deleteOne({ _id: pendingDesfazer.id, user_hash: userHash });
+          await logEvent('debt_undone', from, { type: pendingDesfazer.type });
+        }
+        await replyWithRetry(from, "✅ Desfeito! Último registo apagado.");
+      } catch (err) {
+        console.error('[/DESFAZER] Error deleting:', err.message);
+        await reply(from, "Erro ao desfazer. Tenta novamente mais tarde.");
+      }
+    } else if (isNegative(text)) {
+      await reply(from, "Operação cancelada.");
+    } else {
+      await reply(from, "Não entendi. Responde Sim ou Não.");
+    }
+    markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
+    await saveSessionIfDirty();
     return res.sendStatus(204);
     break;
   }
@@ -1721,7 +1848,7 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
       ["recebido", "devido"].includes(parsedDebt.type) &&
       Number.isFinite(parsedDebt.amount) &&
       parsedDebt.amount > 0 &&
-      parsedDebt.amount <= 1_000_000_000 &&
+      parsedDebt.amount <= MAX_AMOUNT &&
       typeof parsedDebt.creditor === "string" &&
       parsedDebt.creditor.trim().length > 0 &&
       typeof parsedDebt.debtor === "string" &&
@@ -1775,8 +1902,8 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
 
       const whoOwes = parsedDebt.type === "recebido" ? parsedDebt.debtor : parsedDebt.creditor;
       const debtText = parsedDebt.type === "recebido"
-        ? `${whoOwes} te deve ${parsedDebt.amount}`
-        : `tu deves ${parsedDebt.amount} a ${whoOwes}`;
+        ? `${whoOwes} te deve ${formatKz(parsedDebt.amount)}`
+        : `tu deves ${formatKz(parsedDebt.amount)} a ${whoOwes}`;
       await reply(
         from,
         `Registar que ${debtText} Kz?\nResponde: Sim ou Não`
@@ -1808,7 +1935,7 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
     parsed.description = parsed.description.trim();
 
     // Validate amount before presenting confirmation prompt
-    if (parsed.amount <= 0 || parsed.amount > 1_000_000_000) {
+    if (parsed.amount <= 0 || parsed.amount > MAX_AMOUNT) {
       await reply(from, "Valor inválido. Tenta novamente.");
       return res.sendStatus(204);
     }
@@ -1821,7 +1948,7 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
 
     await reply(
       from,
-      `Registar ${parsed.type === "income" ? "entrada" : "saída"} de ${parsed.amount} Kz (${parsed.description})?\nResponde: Sim ou Não`
+      `Registar ${parsed.type === "income" ? "entrada" : "saída"} de ${formatKz(parsed.amount)} Kz (${parsed.description})?\nResponde: Sim ou Não`
     );
 
     return res.sendStatus(204);

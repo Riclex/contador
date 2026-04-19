@@ -6,7 +6,12 @@ import {
   isValidWhatsAppPhone,
   sanitizeForPrompt,
   getAngolaMidnightUTC,
-  MAX_OPENAI_INPUT_LENGTH
+  MAX_OPENAI_INPUT_LENGTH,
+  MAX_AMOUNT,
+  isAffirmative,
+  isNegative,
+  isConfirmationWord,
+  formatKz
 } from '../lib/security.js';
 
 // --- hashPhone ---
@@ -148,5 +153,119 @@ describe('getAngolaMidnightUTC', () => {
     assert.equal(result.getUTCSeconds(), 0);
     // Angola day is 15th, so midnight Angola for that day = 14th 23:00 UTC
     assert.equal(result.getUTCDate(), 14);
+  });
+});
+
+// --- MAX_AMOUNT ---
+describe('MAX_AMOUNT', () => {
+  it('equals 1 billion', () => {
+    assert.equal(MAX_AMOUNT, 1_000_000_000);
+  });
+});
+
+// --- isAffirmative ---
+describe('isAffirmative', () => {
+  it('recognizes "sim" as affirmative', () => {
+    assert.ok(isAffirmative('sim'));
+  });
+  it('recognizes "ya" as affirmative', () => {
+    assert.ok(isAffirmative('ya'));
+  });
+  it('recognizes "ep" as affirmative', () => {
+    assert.ok(isAffirmative('ep'));
+  });
+  it('recognizes "s" as affirmative', () => {
+    assert.ok(isAffirmative('s'));
+  });
+  it('recognizes "claro" as affirmative', () => {
+    assert.ok(isAffirmative('claro'));
+  });
+  it('recognizes "Sim" with capital (case-insensitive)', () => {
+    assert.ok(isAffirmative('Sim'));
+  });
+  it('recognizes "SIM" all caps', () => {
+    assert.ok(isAffirmative('SIM'));
+  });
+  it('recognizes " ok " with whitespace', () => {
+    assert.ok(isAffirmative(' ok '));
+  });
+  it('rejects "nao" as not affirmative', () => {
+    assert.ok(!isAffirmative('nao'));
+  });
+  it('rejects "não" as not affirmative', () => {
+    assert.ok(!isAffirmative('não'));
+  });
+  it('rejects random text', () => {
+    assert.ok(!isAffirmative('vendi'));
+  });
+});
+
+// --- isNegative ---
+describe('isNegative', () => {
+  it('recognizes "nao" as negative', () => {
+    assert.ok(isNegative('nao'));
+  });
+  it('recognizes "não" as negative', () => {
+    assert.ok(isNegative('não'));
+  });
+  it('recognizes "n" as negative', () => {
+    assert.ok(isNegative('n'));
+  });
+  it('recognizes "cancela" as negative', () => {
+    assert.ok(isNegative('cancela'));
+  });
+  it('recognizes "Nao" with capital (case-insensitive)', () => {
+    assert.ok(isNegative('Nao'));
+  });
+  it('rejects "sim" as not negative', () => {
+    assert.ok(!isNegative('sim'));
+  });
+  it('rejects random text', () => {
+    assert.ok(!isNegative('comprei'));
+  });
+});
+
+// --- isConfirmationWord ---
+describe('isConfirmationWord', () => {
+  it('returns true for affirmative words', () => {
+    assert.ok(isConfirmationWord('sim'));
+    assert.ok(isConfirmationWord('ya'));
+  });
+  it('returns true for negative words', () => {
+    assert.ok(isConfirmationWord('nao'));
+    assert.ok(isConfirmationWord('não'));
+  });
+  it('returns false for random text', () => {
+    assert.ok(!isConfirmationWord('vendi'));
+    assert.ok(!isConfirmationWord('hoje'));
+  });
+});
+
+// --- formatKz ---
+describe('formatKz', () => {
+  it('formats 0 as "0,00"', () => {
+    assert.equal(formatKz(0), '0,00');
+  });
+  it('formats 5000 as "5 000,00"', () => {
+    assert.equal(formatKz(5000), '5 000,00');
+  });
+  it('formats 5000.5 as "5 000,50"', () => {
+    assert.equal(formatKz(5000.5), '5 000,50');
+  });
+  it('formats 1000000 as "1 000 000,00"', () => {
+    assert.equal(formatKz(1000000), '1 000 000,00');
+  });
+  it('formats negative numbers with sign', () => {
+    assert.equal(formatKz(-500), '-500,00');
+  });
+  it('returns "0,00" for non-finite input', () => {
+    assert.equal(formatKz(NaN), '0,00');
+    assert.equal(formatKz(Infinity), '0,00');
+  });
+  it('formats 12.34 as "12,34"', () => {
+    assert.equal(formatKz(12.34), '12,34');
+  });
+  it('formats 100 as "100,00"', () => {
+    assert.equal(formatKz(100), '100,00');
   });
 });

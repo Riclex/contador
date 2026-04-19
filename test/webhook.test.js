@@ -8,13 +8,15 @@ import {
   sanitizeInput,
   sanitizeForPrompt
 } from '../index.js';
+import { isAffirmative, isNegative, isConfirmationWord, formatKz } from '../lib/security.js';
 
 // --- Session State Enum Validation ---
 
 describe('Webhook - Session State Completeness', () => {
   it('SessionState has all required states', () => {
     const requiredStates = ['IDLE', 'AWAITING_CONFIRMATION', 'AWAITING_DEBT_CONFIRMATION',
-      'AWAITING_PAGO_CONFIRM', 'AWAITING_DEBTOR_NAME', 'AWAITING_APAGAR_CONFIRM'];
+      'AWAITING_PAGO_CONFIRM', 'AWAITING_DEBTOR_NAME', 'AWAITING_APAGAR_CONFIRM',
+      'AWAITING_DESFAZER_CONFIRM'];
     for (const state of requiredStates) {
       assert.ok(SessionState[state], `Missing SessionState.${state}`);
       assert.equal(typeof SessionState[state], 'string');
@@ -32,18 +34,19 @@ describe('Webhook - Session State Completeness', () => {
 
 describe('Webhook - Command Override Detection', () => {
   const COMMANDS = new Set([
-    'hoje', '/quemedeve', '/quemdevo', '/kilapi', '/stats',
+    'hoje', '/hoje', '/quemedeve', '/quemdevo', '/kilapi', '/stats',
     'ajuda', '/ajuda', 'comandos', '/comandos',
     'privacidade', '/privacidade', 'termos', '/termos',
     'meusdados', '/meusdados', 'apagar', '/apagar',
-    'resumo', '/resumo', 'mes', '/mes'
+    'resumo', '/resumo', 'mes', '/mes',
+    'desfazer', '/desfazer'
   ]);
 
   function shouldResetToIdle(state, text) {
     // Mirrors the logic in the webhook handler:
-    // If user is in non-IDLE state and types a command (not sim/nao/não), reset to IDLE
+    // If user is in non-IDLE state and types a command (not a confirmation word), reset to IDLE
     if (state === SessionState.IDLE) return false;
-    if (text === 'sim' || text === 'nao' || text === 'não') return false;
+    if (isConfirmationWord(text)) return false;
     return COMMANDS.has(text) || /^\/\w+\s+/.test(text);
   }
 
@@ -61,6 +64,10 @@ describe('Webhook - Command Override Detection', () => {
 
   it('resets for "hoje" during confirmation', () => {
     assert.ok(shouldResetToIdle(SessionState.AWAITING_CONFIRMATION, 'hoje'));
+  });
+
+  it('resets for "/hoje" during confirmation', () => {
+    assert.ok(shouldResetToIdle(SessionState.AWAITING_CONFIRMATION, '/hoje'));
   });
 
   it('resets for "/ajuda" during debt confirmation', () => {
@@ -93,17 +100,29 @@ describe('Webhook - Command Override Detection', () => {
 
 describe('Webhook - Confirmation Branch Logic', () => {
   function handleConfirmationInput(text) {
-    // Mirrors the 3-branch confirmation logic:
-    // "sim" → confirm
-    // "nao"/"não" → cancel, return
-    // else → cancel, fall through to parsing
-    if (text === 'sim') return { action: 'confirm', fallThrough: false };
-    if (text === 'nao' || text === 'não') return { action: 'cancel', fallThrough: false };
-    return { action: 'cancel', fallThrough: true };
+    // Mirrors the updated confirmation logic using isAffirmative/isNegative:
+    // affirmative → confirm
+    // negative → cancel
+    // else → ask for clarification (no fall-through)
+    if (isAffirmative(text)) return { action: 'confirm', fallThrough: false };
+    if (isNegative(text)) return { action: 'cancel', fallThrough: false };
+    return { action: 'clarify', fallThrough: false };
   }
 
   it('"sim" confirms without fall-through', () => {
     const result = handleConfirmationInput('sim');
+    assert.equal(result.action, 'confirm');
+    assert.equal(result.fallThrough, false);
+  });
+
+  it('"ya" confirms (Angolan slang)', () => {
+    const result = handleConfirmationInput('ya');
+    assert.equal(result.action, 'confirm');
+    assert.equal(result.fallThrough, false);
+  });
+
+  it('"s" confirms (shorthand)', () => {
+    const result = handleConfirmationInput('s');
     assert.equal(result.action, 'confirm');
     assert.equal(result.fallThrough, false);
   });
@@ -120,16 +139,22 @@ describe('Webhook - Confirmation Branch Logic', () => {
     assert.equal(result.fallThrough, false);
   });
 
-  it('other input cancels WITH fall-through (for re-parsing)', () => {
-    const result = handleConfirmationInput('vendi 5000 de pao');
+  it('"n" cancels (shorthand)', () => {
+    const result = handleConfirmationInput('n');
     assert.equal(result.action, 'cancel');
-    assert.equal(result.fallThrough, true);
+    assert.equal(result.fallThrough, false);
   });
 
-  it('random text cancels with fall-through', () => {
+  it('other input asks for clarification (no fall-through)', () => {
+    const result = handleConfirmationInput('vendi 5000 de pao');
+    assert.equal(result.action, 'clarify');
+    assert.equal(result.fallThrough, false);
+  });
+
+  it('random text asks for clarification', () => {
     const result = handleConfirmationInput('abc');
-    assert.equal(result.action, 'cancel');
-    assert.equal(result.fallThrough, true);
+    assert.equal(result.action, 'clarify');
+    assert.equal(result.fallThrough, false);
   });
 });
 
@@ -143,14 +168,14 @@ describe('Webhook - /pago Disambiguation Format', () => {
     const suffix = extraDebts > 0
       ? ` (mais ${extraDebts} dívida${extraDebts > 1 ? 's' : ''})`
       : '';
-    return `Marcar como paga: ${who} ${amount} Kz${suffix}?\nResponde: Sim ou Não`;
+    return `Marcar como paga: ${who} ${formatKz(amount)} Kz${suffix}?\nResponde: Sim ou Não`;
   }
 
   it('no suffix when only 1 matching debt', () => {
     const msg = formatPagoPrompt({ type: 'recebido', counterparty: 'João', amount: 2000, extraDebts: 0 });
     assert.ok(!msg.includes('mais'));
     assert.ok(msg.includes('João te deve'));
-    assert.ok(msg.includes('2000 Kz'));
+    assert.ok(msg.includes('2 000,00 Kz'));
   });
 
   it('singular "dívida" for 1 extra debt', () => {
@@ -240,6 +265,36 @@ describe('Webhook - Debt Name Validation (isValidDebtName)', () => {
     assert.ok(!isValidDebtName('João$'));
     assert.ok(!isValidDebtName('Maria_Silva'));
   });
+
+  it('rejects "sim" as a debt name (reserved confirmation word)', () => {
+    assert.ok(!isValidDebtName('sim'));
+  });
+
+  it('rejects "nao" as a debt name (reserved confirmation word)', () => {
+    assert.ok(!isValidDebtName('nao'));
+  });
+
+  it('rejects "não" as a debt name (reserved confirmation word)', () => {
+    assert.ok(!isValidDebtName('não'));
+  });
+
+  it('rejects "ya" as a debt name (reserved confirmation word)', () => {
+    assert.ok(!isValidDebtName('ya'));
+  });
+
+  it('rejects "Sim" with capital S (case-insensitive)', () => {
+    assert.ok(!isValidDebtName('Sim'));
+  });
+
+  it('rejects "s" as a debt name (reserved)', () => {
+    assert.ok(!isValidDebtName('s'));
+  });
+
+  it('accepts valid names that are not reserved words', () => {
+    assert.ok(isValidDebtName('João'));
+    assert.ok(isValidDebtName('Maria'));
+    assert.ok(isValidDebtName('Ana'));
+  });
 });
 
 // --- Integration Tests (TODO: require running server with MongoDB) ---
@@ -253,4 +308,22 @@ describe('Webhook - Integration Tests (requires server)', () => {
   it.todo('command during AWAITING_CONFIRMATION resets to IDLE and processes command');
   it.todo('/meusdados masks phone number showing only last 4 digits');
   it.todo('/pago shows extra debt count in confirmation prompt');
+});
+
+// --- /pago regex name matching ---
+describe('/pago name prefix matching', () => {
+  it('prefix-matches partial name', () => {
+    const regex = new RegExp('^joao');
+    assert.ok(regex.test('joao'));
+    assert.ok(regex.test('joao silva'));
+    assert.ok(!regex.test('maria joao'));
+  });
+
+  it('escapes regex special characters', () => {
+    const nameLower = 'Joao.Silva'.toLowerCase();
+    const escapedName = nameLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`^${escapedName}`);
+    assert.ok(regex.test('joao.silva'));
+    assert.ok(!regex.test('joaoXsilva'));
+  });
 });

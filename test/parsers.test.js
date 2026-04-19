@@ -214,3 +214,28 @@ describe('parseDebtRegex - separation from transactions', () => {
     assert.equal(result.error, 'ambiguous');
   });
 });
+
+// --- parseDebtRegex: amount bounds ---
+describe('parseDebtRegex - amount bounds', () => {
+  it('rejects zero amount', () => {
+    const result = parseDebtRegex('O Joao me deve 0 kz');
+    assert.equal(result.error, 'ambiguous');
+  });
+
+  it('rejects amount exceeding 1 billion', () => {
+    const result = parseDebtRegex('O Joao me deve 9999999999999 kz');
+    assert.equal(result.error, 'ambiguous');
+  });
+
+  it('accepts valid amount within bounds', () => {
+    const result = parseDebtRegex('O Joao me deve 5000 kz');
+    assert.equal(result.type, 'recebido');
+    assert.equal(result.amount, 5000);
+  });
+
+  it('accepts amount at exactly 1 billion', () => {
+    const result = parseDebtRegex('O Joao me deve 1000000000 kz');
+    assert.equal(result.type, 'recebido');
+    assert.equal(result.amount, 1000000000);
+  });
+});
