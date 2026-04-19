@@ -190,6 +190,21 @@ const app = express();
 app.use(helmet()); // Security headers (CSP, X-Frame-Options, etc.)
 
 if (isMainModule) {
+// Proactive OpenAI health check (only in server mode, not during tests)
+const openaiHealthTimer = setInterval(async () => {
+  try {
+    await Promise.race([
+      openai.models.list().next(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), OPENAI_HEALTH_TIMEOUT_MS))
+    ]);
+    openaiHealthy = true;
+  } catch (err) {
+    openaiHealthy = false;
+    console.warn('[OPENAI-HEALTH] Check failed:', err.message);
+  }
+}, OPENAI_HEALTH_INTERVAL_MS);
+openaiHealthTimer.unref(); // Don't prevent process exit
+
 app.set('trust proxy', 1); // Trust Railway/reverse proxy headers for signature verification
 
 app.use(bodyParser.urlencoded({
@@ -341,16 +356,6 @@ async function logEvent(eventName, userPhone, metadata = {}) {
 }
 
 // --- User Onboarding
-const ONBOARDING_STATE_KEY = 'onboarding_state';
-
-async function hasGivenConsent(userPhone) {
-  const userHash = hashPhone(userPhone);
-  const userEvents = await events.findOne({
-    user_hash: userHash,
-    event_name: 'consent_given'
-  });
-  return !!userEvents;
-}
 
 async function sendWelcomeMessage(userPhone) {
   const welcomeMessage = `Boas! 👋 Sou o Contador, o teu assistente financeiro no WhatsApp.
@@ -657,22 +662,9 @@ async function callOpenAI(systemPrompt, userPrompt, { temperature = 0 } = {}) {
 }
 let openaiHealthy = true; // Track OpenAI connectivity for health check
 
-// --- Proactive OpenAI health check (prevents stale "connected" status between calls) ---
+// --- Proactive OpenAI health check (moved inside isMainModule to avoid running during tests) ---
 const OPENAI_HEALTH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const OPENAI_HEALTH_TIMEOUT_MS = 5000; // 5 second timeout
-const openaiHealthTimer = setInterval(async () => {
-  try {
-    await Promise.race([
-      openai.models.list().next(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), OPENAI_HEALTH_TIMEOUT_MS))
-    ]);
-    openaiHealthy = true;
-  } catch (err) {
-    openaiHealthy = false;
-    console.warn('[OPENAI-HEALTH] Check failed:', err.message);
-  }
-}, OPENAI_HEALTH_INTERVAL_MS);
-openaiHealthTimer.unref(); // Don't prevent process exit
 
 async function parseDebtOpenAI(text) {
   const result = await callOpenAI(
@@ -1453,7 +1445,9 @@ Responde "sim" para apagar TODOS os teus dados ou "não" para cancelar.`;
       const dayBalance = Number.isFinite(dayIncome) && Number.isFinite(dayExpense)
         ? dayIncome - dayExpense : 0;
       const signal = dayBalance >= 0 ? '+' : '';
-      message += `\n${day._id}: ${signal}${formatKz(dayBalance)} Kz`;
+      const dayDate = new Date(day._id + 'T00:00:00Z');
+      const dayStr = dayDate.toLocaleDateString('pt-AO', { weekday: 'short', day: 'numeric' });
+      message += `\n${dayStr}: ${signal}${formatKz(dayBalance)} Kz`;
     }
 
     await replyWithRetry(from, message);
