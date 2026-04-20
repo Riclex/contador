@@ -243,11 +243,17 @@ app.use(bodyParser.urlencoded({
 }));
 
 // --- Environment Validation
-const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "WEBHOOK_URL"];
+const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"];
 const missing = requiredEnvVars.filter((key) => !process.env[key]);
 if (missing.length > 0) {
   console.error(`Missing required environment variables: ${missing.join(", ")}`);
   process.exit(1);
+}
+
+// WEBHOOK_URL is strongly recommended — without it, signature verification falls back
+// to header-based URL reconstruction which may fail behind misconfigured proxies
+if (!process.env.WEBHOOK_URL) {
+  console.warn('[WARN] WEBHOOK_URL not set — Twilio signature verification will use header-based URL reconstruction. Set WEBHOOK_URL for production deployments.');
 }
 
 // Admin phone numbers for /stats command (required, no defaults)
