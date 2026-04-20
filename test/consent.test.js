@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { SessionState, OnboardingState } from '../index.js';
+import { SessionState, OnboardingState } from '../lib/security.js';
 
 describe('Consent Flow (Lei 22/11)', () => {
 
@@ -29,11 +29,5 @@ describe('Consent Flow (Lei 22/11)', () => {
     });
   });
 
-  // --- Integration tests requiring running server ---
-  // These cannot run in unit test mode because the consent flow
-  // is embedded inside the webhook handler and depends on MongoDB.
-  it.todo('first_use event logged only AFTER user responds "sim"');
-  it.todo('non-consenting users (other input) generate no first_use event');
-  it.todo('onboarding transitions: new user -> awaiting_consent -> completed');
-  it.todo('rate limiting applies before consent check (non-consenting users still rate-limited)');
+  // Integration tests for consent/onboarding flow are in test/integration/onboarding.test.js
 });

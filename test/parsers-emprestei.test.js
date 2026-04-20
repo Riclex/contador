@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDebtRegex, parseTransactionRegex, EXPENSE_VERBS } from '../index.js';
+import { parseDebtRegex, parseTransactionRegex, EXPENSE_VERBS } from '../lib/parsers.js';
 
 describe('emprestei classification', () => {
   it('"emprestei 500 ao Joao" is a debt (recebido) via parseDebtRegex', () => {

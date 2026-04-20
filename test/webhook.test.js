@@ -3,11 +3,8 @@ import assert from 'node:assert/strict';
 import {
   SessionState,
   OnboardingState,
-  isValidDebtName,
-  hashPhone,
-  sanitizeInput,
-  sanitizeForPrompt
-} from '../index.js';
+  isValidDebtName
+} from '../lib/security.js';
 import { isAffirmative, isNegative, isConfirmationWord, formatKz } from '../lib/security.js';
 
 // --- Session State Enum Validation ---
@@ -297,18 +294,7 @@ describe('Webhook - Debt Name Validation (isValidDebtName)', () => {
   });
 });
 
-// --- Integration Tests (TODO: require running server with MongoDB) ---
-
-describe('Webhook - Integration Tests (requires server)', () => {
-  it.todo('AWAITING_CONFIRMATION + "sim" confirms and inserts transaction');
-  it.todo('AWAITING_DEBT_CONFIRMATION + "sim" confirms and inserts debt');
-  it.todo('AWAITING_PAGO_CONFIRM + "sim" marks debt as settled');
-  it.todo('full onboarding flow: new user → consent → completed');
-  it.todo('rate limit exceeded returns 204 with notice');
-  it.todo('command during AWAITING_CONFIRMATION resets to IDLE and processes command');
-  it.todo('/meusdados masks phone number showing only last 4 digits');
-  it.todo('/pago shows extra debt count in confirmation prompt');
-});
+// Integration tests are in test/integration/ (transaction, debt, commands, session, rate-limit, onboarding)
 
 // --- /pago regex name matching ---
 describe('/pago name prefix matching', () => {

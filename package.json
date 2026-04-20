@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node index.js",
     "test": "node --test test/*.test.js",
-    "test:coverage": "node --test --experimental-test-coverage test/*.test.js"
+    "test:integration": "node --test test/integration/*.test.js",
+    "test:all": "node --test test/*.test.js test/integration/*.test.js",
+    "test:coverage": "node --test --experimental-test-coverage test/*.test.js test/integration/*.test.js"
   },
   "dependencies": {
     "body-parser": "^1.20.2",
@@ -16,5 +18,8 @@
     "mongodb": "^6.3.0",
     "openai": "^4.28.0",
     "twilio": "^4.21.0"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^11.0.1"
   }
 }
