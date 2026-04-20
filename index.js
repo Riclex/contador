@@ -191,6 +191,8 @@ app.use(helmet()); // Security headers (CSP, X-Frame-Options, etc.)
 
 if (isMainModule) {
 // Proactive OpenAI health check (only in server mode, not during tests)
+const OPENAI_HEALTH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const OPENAI_HEALTH_TIMEOUT_MS = 5000; // 5 second timeout
 const openaiHealthTimer = setInterval(async () => {
   try {
     await Promise.race([
@@ -662,9 +664,6 @@ async function callOpenAI(systemPrompt, userPrompt, { temperature = 0 } = {}) {
 }
 let openaiHealthy = true; // Track OpenAI connectivity for health check
 
-// --- Proactive OpenAI health check (moved inside isMainModule to avoid running during tests) ---
-const OPENAI_HEALTH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const OPENAI_HEALTH_TIMEOUT_MS = 5000; // 5 second timeout
 
 async function parseDebtOpenAI(text) {
   const result = await callOpenAI(
