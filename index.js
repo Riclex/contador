@@ -12,7 +12,7 @@ import rateLimit from 'express-rate-limit';
 import { normalize, parseTransactionRegex, parseDebtRegex, INCOME_VERBS, EXPENSE_VERBS, DEBT_VERBS_RECEBIDO, DEBT_VERBS_DEVIDO } from './lib/parsers.js';
 import { hashPhone, sanitizeInput, isValidWhatsAppPhone, sanitizeForPrompt, MAX_OPENAI_INPUT_LENGTH, getAngolaMidnightUTC, ANGOLA_OFFSET_MS, MAX_AMOUNT, isAffirmative, isNegative, isConfirmationWord, formatKz, SessionState, OnboardingState, isValidDebtName, validateTransactionResponse, validateDebtResponse } from './lib/security.js';
 import { getCacheKey, getCachedResponse, setCachedResponse, getCacheStats } from './lib/cache.js';
-import { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleDebtParse, handleTransactionParse } from './lib/commands.js';
+import { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleDebtParse, handleTransactionParse } from './lib/commands.js';
 
 // --- Angola timezone helper (imported from lib/security.js)
 
@@ -92,6 +92,60 @@ async function getEnhancedStats() {
   };
 
   return stats;
+}
+
+async function getRetentionData() {
+  const today = getAngolaMidnightUTC();
+  const results = {};
+
+  // For each cohort (users who had first_use on day N), check if they returned on day N+1, N+7, N+30
+  const cohortDays = [1, 7, 30];
+  const firstUseUsers = await events.find({ event_name: 'first_use' }).sort({ timestamp: 1 }).toArray();
+
+  if (firstUseUsers.length === 0) return { totalUsers: 0, cohorts: [] };
+
+  // Group first_use events by day (Angola timezone)
+  const cohorts = {};
+  for (const event of firstUseUsers) {
+    const angolaDate = new Date(event.timestamp.getTime() + ANGOLA_OFFSET_MS);
+    const dayKey = `${angolaDate.getUTCFullYear()}-${String(angolaDate.getUTCMonth() + 1).padStart(2, '0')}-${String(angolaDate.getUTCDate()).padStart(2, '0')}`;
+    if (!cohorts[dayKey]) cohorts[dayKey] = [];
+    cohorts[dayKey].push(event.user_hash);
+  }
+
+  // Get all user activity timestamps for retention checking
+  const allActivity = await events.aggregate([
+    { $group: { _id: '$user_hash', lastActive: { $max: '$timestamp' }, firstSeen: { $min: '$timestamp' } } }
+  ]).toArray();
+  const userActivity = new Map(allActivity.map(u => [u._id, u]));
+
+  const cohortResults = [];
+  for (const [dayKey, users] of Object.entries(cohorts)) {
+    const cohortDate = new Date(dayKey + 'T00:00:00Z');
+    const retention = { date: dayKey, size: users.length };
+
+    for (const n of cohortDays) {
+      const targetDate = new Date(cohortDate.getTime() + n * 24 * 60 * 60 * 1000);
+      if (targetDate > today) {
+        retention[`d${n}`] = null; // Not enough time has passed
+      } else {
+        const returned = users.filter(hash => {
+          const activity = userActivity.get(hash);
+          return activity && activity.lastActive >= targetDate;
+        }).length;
+        retention[`d${n}`] = users.length > 0 ? Math.round((returned / users.length) * 100) : 0;
+      }
+    }
+    cohortResults.push(retention);
+  }
+
+  // Sort by date descending, keep last 30
+  cohortResults.sort((a, b) => b.date.localeCompare(a.date));
+
+  return {
+    totalUsers: firstUseUsers.length,
+    cohorts: cohortResults.slice(0, 30)
+  };
 }
 
 async function checkRateLimit(userPhone) {
@@ -189,7 +243,7 @@ app.use(bodyParser.urlencoded({
 }));
 
 // --- Environment Validation
-const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"];
+const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "WEBHOOK_URL"];
 const missing = requiredEnvVars.filter((key) => !process.env[key]);
 if (missing.length > 0) {
   console.error(`Missing required environment variables: ${missing.join(", ")}`);
@@ -609,7 +663,7 @@ async function setOnboardingState(userPhone, state) {
   const userHash = hashPhone(userPhone);
   await db.collection('onboarding').updateOne(
     { user_hash: userHash },
-    { $set: { state, updated_at: new Date() } },
+    { $set: { state, updated_at: new Date(), phone: userPhone } },
     { upsert: true }
   );
 }
@@ -823,6 +877,19 @@ Experimenta mandar algo como:
     parseDebt,
     adminNumbers: ADMIN_NUMBERS,
     getEnhancedStats,
+    getRetentionData,
+    broadcast: async (users, message) => {
+      let sent = 0, failed = 0;
+      for (const user of users) {
+        if (user.phone) {
+          try {
+            await twilioClient.messages.create({ from: TWILIO_WHATSAPP_NUMBER, to: user.phone, body: message });
+            sent++;
+          } catch { failed++; }
+        } else { failed++; }
+      }
+      return { sent, failed };
+    },
   };
 
   // --- Command dispatch ---
@@ -864,6 +931,16 @@ Experimenta mandar algo como:
     return res.sendStatus(204);
   }
 
+  if (text === "/retencao") {
+    await handleRetencao(ctx);
+    return res.sendStatus(204);
+  }
+
+  if (text.startsWith("/anunciar ") || text === "/anunciar") {
+    await handleAnunciar(ctx);
+    return res.sendStatus(204);
+  }
+
   if (text === "ajuda" || text === "/ajuda" || text === "comandos" || text === "/comandos") {
     await handleAjuda(ctx);
     return res.sendStatus(204);
@@ -891,6 +968,16 @@ Experimenta mandar algo como:
 
   if (text === "desfazer" || text === "/desfazer") {
     await handleDesfazer(ctx);
+    return res.sendStatus(204);
+  }
+
+  if (text === "/exportar") {
+    await handleExportar(ctx);
+    return res.sendStatus(204);
+  }
+
+  if (text.startsWith("/feedback ") || text === "/feedback") {
+    await handleFeedback(ctx);
     return res.sendStatus(204);
   }
 
@@ -1267,4 +1354,4 @@ export {
   getCacheStats
 } from './lib/cache.js';
 
-export { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleDebtParse, handleTransactionParse } from './lib/commands.js';
+export { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleDebtParse, handleTransactionParse } from './lib/commands.js';

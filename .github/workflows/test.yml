@@ -1,0 +1,43 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: |
+          node --check index.js
+          node --check lib/commands.js
+          node --check lib/security.js
+          node --check lib/parsers.js
+          node --check lib/cache.js
+
+      - name: Run unit tests
+        run: node --test test/consent.test.js test/webhook.test.js test/parsers-emprestei.test.js
+
+      - name: Run integration tests
+        run: node --test test/integration/*.test.js
+
+      - name: Run all tests
+        run: node --test test/consent.test.js test/webhook.test.js test/parsers-emprestei.test.js test/integration/*.test.js

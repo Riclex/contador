@@ -39,6 +39,10 @@ export function createTestContext(overrides = {}) {
       cache: { size: 0, hits: 0, misses: 0, hitRate: '0%' },
       system: { uptime: '0d 0h 0m', mongodb: '✅' }
     })),
+    getRetentionData: overrides.getRetentionData || (async () => ({
+      totalUsers: 0,
+      cohorts: []
+    })),
     _sessionDirty: false,
     _getSessionDirty: () => sessionDirty,
   };
