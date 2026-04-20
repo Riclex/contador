@@ -197,6 +197,11 @@ async function checkRateLimit(userPhone) {
 const MAX_PROCESSED_MESSAGES = 10000;
 const processedMessages = new Set();
 
+// --- Rate limiting state (available at module level for health endpoint)
+let mongoConnected = false;
+let serverReady = false;
+let transactionsSupported = false;
+
 // --- Response Cache (imported from lib/cache.js)
 
 // --- Main module guard — server only starts when index.js is run directly, not when imported by tests
@@ -270,9 +275,7 @@ function isAdmin(phone) {
 const mongo = new MongoClient(process.env.MONGODB_URI);
 
 // MongoDB connection retry with exponential backoff
-let mongoConnected = false;
-let serverReady = false; // Set true after all startup completes
-let transactionsSupported = false; // Set true if MongoDB supports transactions (replica set)
+// (mongoConnected, serverReady, transactionsSupported declared at module level above)
 let db = null;
 let transactions = null;
 let debts = null;
