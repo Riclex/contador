@@ -6,6 +6,7 @@ import {
   isValidDebtName
 } from '../lib/security.js';
 import { isAffirmative, isNegative, isConfirmationWord, formatKz } from '../lib/security.js';
+import { COMMANDS } from '../lib/commands.js';
 
 // --- Session State Enum Validation ---
 
@@ -30,14 +31,6 @@ describe('Webhook - Session State Completeness', () => {
 // --- Command Override Logic ---
 
 describe('Webhook - Command Override Detection', () => {
-  const COMMANDS = new Set([
-    'hoje', '/hoje', '/quemedeve', '/quemdevo', '/kilapi', '/stats',
-    'ajuda', '/ajuda', 'comandos', '/comandos',
-    'privacidade', '/privacidade', 'termos', '/termos',
-    'meusdados', '/meusdados', 'apagar', '/apagar',
-    'resumo', '/resumo', 'mes', '/mes',
-    'desfazer', '/desfazer'
-  ]);
 
   function shouldResetToIdle(state, text) {
     // Mirrors the logic in the webhook handler:

@@ -1,6 +1,6 @@
 # Termos de Uso - Contador
 
-**Última atualização:** 16 de Março de 2026
+**Última atualização:** 20 de Abril de 2026
 
 ## 1. Descrição do Serviço
 
@@ -9,7 +9,10 @@ O **Contador** é um assistente financeiro baseado em WhatsApp que permite aos u
 - Registrar transações de renda e despesas usando linguagem natural em Português
 - Rastrear dívidas entre usuários e terceiros
 - Obter resumos de saldo diário, semanal e mensal
-- Visualizar histórico de transações
+- Visualizar e exportar histórico de transações (`/meusdados`, `/exportar`)
+- Desfazer o último registo (`/desfazer`)
+- Enviar feedback e sugestões (`/feedback`)
+- Excluir permanentemente todos os dados (`/apagar`)
 
 O serviço é fornecido através da integração com a API do WhatsApp (Twilio) e utiliza processamento de linguagem natural (OpenAI GPT-4o-mini) para interpretar mensagens.
 

@@ -62,7 +62,7 @@ Nos termos da Lei 22/11, você tem direito a:
 | **Retificação** | Envie mensagens corrigindo informações incorretas |
 | **Eliminação (Direito ao Esquecimento)** | Comando `/apagar` - deleta permanentemente todos os dados |
 | **Oposição** | Comando `/apagar` - cessa todo processamento de dados |
-| **Portabilidade** | Solicite exportação dos dados via contato com administração |
+| **Portabilidade** | Comando `/exportar` - exporta todos os dados diretamente no bot |
 
 ## 5. Armazenamento de Dados
 
@@ -126,6 +126,7 @@ Estas transferências são necessárias para a prestação do serviço e contam 
 | Comando | Ação |
 |---------|------|
 | `/meusdados` | Visualizar todos os dados armazenados |
+| `/exportar` | Exportar todos os dados para portabilidade |
 | `/apagar` | Deletar permanentemente todos os dados de forma atômica (incluindo registos de limitação de uso) |
 
 ### 7.2 Contato com a Administração
