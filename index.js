@@ -94,6 +94,8 @@ async function getEnhancedStats() {
 }
 
 async function checkRateLimit(userPhone) {
+  // If MongoDB is disconnected, rate limiting cannot function — block the request
+  if (!mongoConnected) return { allowed: false, remaining: 0, resetTime: Date.now() + 86400000, sendNotice: false };
   // Use Angola timezone for day boundary so rate limit resets at Angola midnight
   const angolaDate = new Date(Date.now() + ANGOLA_OFFSET_MS);
   const year = angolaDate.getUTCFullYear();
@@ -181,6 +183,7 @@ const mongo = new MongoClient(process.env.MONGODB_URI);
 // MongoDB connection retry with exponential backoff
 let mongoConnected = false;
 let serverReady = false; // Set true after all startup completes
+let transactionsSupported = false; // Set true if MongoDB supports transactions (replica set)
 let db = null;
 let transactions = null;
 let debts = null;
@@ -601,6 +604,8 @@ const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, ne
 app.post("/webhook", asyncHandler(async (req, res) => {
   // Reject requests while server is still initializing (MongoDB not ready yet)
   if (!serverReady) return res.sendStatus(503);
+  // Reject requests when MongoDB is disconnected after startup (prevents 500s and Twilio retry storms)
+  if (!mongoConnected) return res.sendStatus(503);
 
   // Webhook timeout — Twilio times out at ~15s; fail fast if we can't respond in time
   const WEBHOOK_TIMEOUT_MS = 12000;
@@ -777,6 +782,7 @@ Experimenta mandar algo como:
     events,
     rateLimits,
     mongoClient: mongo,
+    transactionsSupported,
     reply: (body) => reply(from, body),
     replyWithRetry: (body) => replyWithRetry(from, body),
     logEvent: (eventName, metadata) => logEvent(eventName, from, metadata),
@@ -1120,6 +1126,20 @@ try {
   console.error('[DB] Dedup set pre-population failed (non-fatal):', err.message);
 }
 
+// Detect MongoDB transaction support (requires replica set)
+try {
+  const adminDb = mongo.db('admin');
+  const serverInfo = await adminDb.command({ isMaster: 1 });
+  transactionsSupported = !!(serverInfo.setName);
+  if (transactionsSupported) {
+    console.log('[DB] MongoDB replica set detected — transactions enabled');
+  } else {
+    console.warn('[DB] MongoDB standalone detected — transactions disabled, /apagar will use sequential deletion');
+  }
+} catch (err) {
+  console.warn('[DB] Could not detect MongoDB transaction support:', err.message);
+}
+
 // --- All startup complete — server is now ready to handle requests
 serverReady = true;
 console.log('Server ready — all startup complete');
@@ -1169,6 +1189,24 @@ async function gracefulShutdown() {
 
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
+
+// Prevent unhandled rejections and exceptions from crashing the process silently
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled promise rejection:', reason);
+  // Don't exit immediately — log and let the process continue.
+  // The Express error handler and asyncHandler wrapper catch route-level errors.
+  // Background errors (health checks, reconnects) are non-fatal — the process
+  // should keep serving requests. A crash loop would be worse than a logged error.
+});
+process.on('uncaughtException', (error) => {
+  console.error('[FATAL] Uncaught exception:', error);
+  // For truly unrecoverable errors (corrupted state, etc.), exit gracefully.
+  // The graceful shutdown handler will drain connections.
+  if (error.code === 'ERR_MODULE_NOT_FOUND' || error.code === 'EADDRINUSE') {
+    gracefulShutdown();
+  }
+  // For all other errors, log and continue — crash loops are worse than transient errors.
+});
 
 } // end if (isMainModule)
 

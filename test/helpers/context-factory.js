@@ -21,6 +21,7 @@ export function createTestContext(overrides = {}) {
     events: overrides.events || null,
     rateLimits: overrides.rateLimits || null,
     mongoClient: overrides.mongoClient || null,
+    transactionsSupported: overrides.transactionsSupported !== undefined ? overrides.transactionsSupported : true,
     reply: (body) => { messages.push({ body }); },
     replyWithRetry: (body) => { messages.push({ body }); },
     logEvent: (eventName, metadata) => { events.push({ eventName, metadata }); },
