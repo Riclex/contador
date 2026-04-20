@@ -8,8 +8,9 @@ import twilio from "twilio";
 import { fileURLToPath, pathToFileURL } from "url";
 import { dirname } from "path";
 import helmet from "helmet";
+import rateLimit from 'express-rate-limit';
 import { normalize, parseTransactionRegex, parseDebtRegex, INCOME_VERBS, EXPENSE_VERBS, DEBT_VERBS_RECEBIDO, DEBT_VERBS_DEVIDO } from './lib/parsers.js';
-import { hashPhone, sanitizeInput, isValidWhatsAppPhone, sanitizeForPrompt, MAX_OPENAI_INPUT_LENGTH, getAngolaMidnightUTC, ANGOLA_OFFSET_MS, MAX_AMOUNT, isAffirmative, isNegative, isConfirmationWord, formatKz, SessionState, OnboardingState, isValidDebtName } from './lib/security.js';
+import { hashPhone, sanitizeInput, isValidWhatsAppPhone, sanitizeForPrompt, MAX_OPENAI_INPUT_LENGTH, getAngolaMidnightUTC, ANGOLA_OFFSET_MS, MAX_AMOUNT, isAffirmative, isNegative, isConfirmationWord, formatKz, SessionState, OnboardingState, isValidDebtName, validateTransactionResponse, validateDebtResponse } from './lib/security.js';
 import { getCacheKey, getCachedResponse, setCachedResponse, getCacheStats } from './lib/cache.js';
 import { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleDebtParse, handleTransactionParse } from './lib/commands.js';
 
@@ -150,6 +151,34 @@ const isMainModule = pathToFileURL(process.argv[1] || '').href === import.meta.u
 
 const app = express();
 app.use(helmet()); // Security headers (CSP, X-Frame-Options, etc.)
+
+// IP-based rate limiting — protects all endpoints from DDoS before reaching app logic
+const globalLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 100, // 100 requests per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 429, error: 'Too many requests' },
+  skip: (req) => req.path === '/health' // /health has its own limiter below
+});
+app.use(globalLimiter);
+
+// Stricter rate limit for /health (prevent probing/abuse)
+const healthLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30, // 30 health checks per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.get("/health", healthLimiter, (_, res) => {
+  if (!serverReady) {
+    return res.status(503).json({ status: "starting", mongodb: "disconnected" });
+  }
+  if (!mongoConnected) {
+    return res.status(503).json({ status: "unhealthy", mongodb: "disconnected" });
+  }
+  res.json({ status: "ok", mongodb: "connected" });
+});
 
 if (isMainModule) {
 app.set('trust proxy', 1); // Trust Railway/reverse proxy headers for signature verification
@@ -370,15 +399,12 @@ async function parseDebtOpenAI(text) {
     { temperature: 0 }
   );
   if (result.error) return result;
-  if (!result.type || !result.creditor || !result.debtor || typeof result.amount !== 'number') {
+  const validated = validateDebtResponse(result);
+  if (validated.error) {
     console.error('[OpenAI] Malformed debt response:', JSON.stringify(result));
-    return { error: 'ambiguous' };
+    return validated;
   }
-  if (result.amount <= 0 || result.amount > MAX_AMOUNT) {
-    console.error('[OpenAI] Debt amount out of range:', result.amount);
-    return { error: 'ambiguous' };
-  }
-  return result;
+  return validated;
 }
 
 async function parseDebt(text) {
@@ -477,16 +503,13 @@ async function parseTransaction(text) {
     { temperature: 0 }
   );
   if (result.error) return result;
-  if (!result.type || typeof result.amount !== 'number') {
+  const validated = validateTransactionResponse(result);
+  if (validated.error) {
     console.error('[OpenAI] Malformed transaction response:', JSON.stringify(result));
-    return { error: 'ambiguous' };
+    return validated;
   }
-  if (result.amount <= 0 || result.amount > MAX_AMOUNT) {
-    console.error('[OpenAI] Transaction amount out of range:', result.amount);
-    return { error: 'ambiguous' };
-  }
-  setCachedResponse(text, 'transaction', result);
-  return result;
+  setCachedResponse(text, 'transaction', validated);
+  return validated;
 }
 
 const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER || "whatsapp:+14155238886";
@@ -650,6 +673,14 @@ app.post("/webhook", asyncHandler(async (req, res) => {
 
   const from = req.body.From;
   const rawText = req.body.Body || "";
+
+  // Reject excessively long messages (WhatsApp max is ~65K chars — no legitimate use case exceeds 2000)
+  const MAX_MESSAGE_LENGTH = 2000;
+  if (rawText.length > MAX_MESSAGE_LENGTH) {
+    console.warn(`[WEBHOOK:${reqId}] Message too long: ${rawText.length} chars from ${hashPhone(from)}`);
+    return res.sendStatus(413);
+  }
+
   const userHash = hashPhone(from);
 
   // Validate phone number format (prevent NoSQL injection)
@@ -921,16 +952,6 @@ Experimenta mandar algo como:
 
 }));
 
-app.get("/health", (_, res) => {
-  if (!serverReady) {
-    return res.status(503).json({ status: "starting", mongodb: "disconnected" });
-  }
-  if (!mongoConnected) {
-    return res.status(503).json({ status: "unhealthy", mongodb: "disconnected" });
-  }
-  res.json({ status: "ok", mongodb: "connected", openai: openaiHealthy ? "connected" : "degraded" });
-});
-
 // Global error handler - catches unhandled errors from async route handlers
 app.use((err, req, res, next) => {
   console.error(`[ERROR] Unhandled error on ${req.method} ${req.path}:`, err.message);
@@ -1193,19 +1214,16 @@ process.on('SIGINT', gracefulShutdown);
 // Prevent unhandled rejections and exceptions from crashing the process silently
 process.on('unhandledRejection', (reason) => {
   console.error('[FATAL] Unhandled promise rejection:', reason);
-  // Don't exit immediately — log and let the process continue.
-  // The Express error handler and asyncHandler wrapper catch route-level errors.
-  // Background errors (health checks, reconnects) are non-fatal — the process
-  // should keep serving requests. A crash loop would be worse than a logged error.
+  // unhandledRejection: log and continue. These are typically from background operations
+  // (health checks, reconnects) where losing the process is worse than logging the error.
+  // Route-level rejections are caught by asyncHandler.
 });
 process.on('uncaughtException', (error) => {
   console.error('[FATAL] Uncaught exception:', error);
-  // For truly unrecoverable errors (corrupted state, etc.), exit gracefully.
-  // The graceful shutdown handler will drain connections.
-  if (error.code === 'ERR_MODULE_NOT_FOUND' || error.code === 'EADDRINUSE') {
-    gracefulShutdown();
-  }
-  // For all other errors, log and continue — crash loops are worse than transient errors.
+  // Per Node.js docs: process state is undefined after uncaughtException.
+  // Always exit gracefully to prevent data corruption and undefined behavior.
+  // Railway/container runtime will restart the process.
+  gracefulShutdown();
 });
 
 } // end if (isMainModule)
