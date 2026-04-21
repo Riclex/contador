@@ -96,54 +96,54 @@ async function getEnhancedStats() {
 
 async function getRetentionData() {
   const today = getAngolaMidnightUTC();
-  const results = {};
 
-  // For each cohort (users who had first_use on day N), check if they returned on day N+1, N+7, N+30
-  const cohortDays = [1, 7, 30];
-  const firstUseUsers = await events.find({ event_name: 'first_use' }).sort({ timestamp: 1 }).toArray();
-
-  if (firstUseUsers.length === 0) return { totalUsers: 0, cohorts: [] };
-
-  // Group first_use events by day (Angola timezone)
-  const cohorts = {};
-  for (const event of firstUseUsers) {
-    const angolaDate = new Date(event.timestamp.getTime() + ANGOLA_OFFSET_MS);
-    const dayKey = `${angolaDate.getUTCFullYear()}-${String(angolaDate.getUTCMonth() + 1).padStart(2, '0')}-${String(angolaDate.getUTCDate()).padStart(2, '0')}`;
-    if (!cohorts[dayKey]) cohorts[dayKey] = [];
-    cohorts[dayKey].push(event.user_hash);
-  }
-
-  // Get all user activity timestamps for retention checking
-  const allActivity = await events.aggregate([
-    { $group: { _id: '$user_hash', lastActive: { $max: '$timestamp' }, firstSeen: { $min: '$timestamp' } } }
+  // Use server-side aggregation to avoid loading all events into memory
+  // Step 1: Group first_use events by Angola-date cohort
+  const cohortAgg = await events.aggregate([
+    { $match: { event_name: 'first_use' } },
+    { $group: {
+      _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp', timezone: 'Africa/Luanda' } },
+      users: { $addToSet: '$user_hash' },
+      size: { $sum: 1 }
+    }},
+    { $sort: { _id: 1 } }
   ]).toArray();
-  const userActivity = new Map(allActivity.map(u => [u._id, u]));
 
-  const cohortResults = [];
-  for (const [dayKey, users] of Object.entries(cohorts)) {
-    const cohortDate = new Date(dayKey + 'T00:00:00Z');
-    const retention = { date: dayKey, size: users.length };
+  if (cohortAgg.length === 0) return { totalUsers: 0, cohorts: [] };
+
+  // Step 2: Get last activity per user (server-side, only what's needed)
+  const allActivity = await events.aggregate([
+    { $group: { _id: '$user_hash', lastActive: { $max: '$timestamp' } } }
+  ]).toArray();
+  const userActivity = new Map(allActivity.map(u => [u._id, u.lastActive]));
+
+  const cohortDays = [1, 7, 30];
+  const totalUsers = cohortAgg.reduce((sum, c) => sum + c.size, 0);
+
+  const cohortResults = cohortAgg.map(cohort => {
+    const cohortDate = new Date(cohort._id + 'T00:00:00Z');
+    const retention = { date: cohort._id, size: cohort.size };
 
     for (const n of cohortDays) {
       const targetDate = new Date(cohortDate.getTime() + n * 24 * 60 * 60 * 1000);
       if (targetDate > today) {
-        retention[`d${n}`] = null; // Not enough time has passed
+        retention[`d${n}`] = null;
       } else {
-        const returned = users.filter(hash => {
-          const activity = userActivity.get(hash);
-          return activity && activity.lastActive >= targetDate;
+        const returned = cohort.users.filter(hash => {
+          const lastActive = userActivity.get(hash);
+          return lastActive && lastActive >= targetDate;
         }).length;
-        retention[`d${n}`] = users.length > 0 ? Math.round((returned / users.length) * 100) : 0;
+        retention[`d${n}`] = cohort.size > 0 ? Math.round((returned / cohort.size) * 100) : 0;
       }
     }
-    cohortResults.push(retention);
-  }
+    return retention;
+  });
 
   // Sort by date descending, keep last 30
   cohortResults.sort((a, b) => b.date.localeCompare(a.date));
 
   return {
-    totalUsers: firstUseUsers.length,
+    totalUsers,
     cohorts: cohortResults.slice(0, 30)
   };
 }
@@ -672,9 +672,17 @@ async function setOnboardingState(userPhone, state) {
   const userHash = hashPhone(userPhone);
   await db.collection('onboarding').updateOne(
     { user_hash: userHash },
-    { $set: { state, updated_at: new Date(), phone: userPhone } },
+    { $set: { state, updated_at: new Date() } },
     { upsert: true }
   );
+  // Maintain broadcast list for /anunciar (separate from onboarding to keep PII isolated)
+  if (state === OnboardingState.COMPLETED) {
+    await db.collection('broadcast_list').updateOne(
+      { user_hash: userHash },
+      { $set: { phone: userPhone, updated_at: new Date() } },
+      { upsert: true }
+    );
+  }
 }
 
 async function getOnboardingState(userPhone) {
@@ -841,12 +849,12 @@ Experimenta mandar algo como:
       }
     }
   }
-  if (session && Date.now() - new Date(session.updatedAt).getTime() > SESSION_TTL_MS) {
+  if (session && session.updatedAt && Date.now() - new Date(session.updatedAt).getTime() > SESSION_TTL_MS) {
     delete sessions[sessionKey];
     session = null;
   }
   if (!session) {
-    session = mongoSession || { state: SessionState.IDLE };
+    session = mongoSession || { state: SessionState.IDLE, updatedAt: new Date() };
     sessions[sessionKey] = session;
   }
 
@@ -887,17 +895,8 @@ Experimenta mandar algo como:
     adminNumbers: ADMIN_NUMBERS,
     getEnhancedStats,
     getRetentionData,
-    broadcast: async (users, message) => {
-      let sent = 0, failed = 0;
-      for (const user of users) {
-        if (user.phone) {
-          try {
-            await twilioClient.messages.create({ from: TWILIO_WHATSAPP_NUMBER, to: user.phone, body: message });
-            sent++;
-          } catch { failed++; }
-        } else { failed++; }
-      }
-      return { sent, failed };
+    sendWhatsApp: async (to, body) => {
+      await twilioClient.messages.create({ from: TWILIO_WHATSAPP_NUMBER, to, body });
     },
   };
 
@@ -1166,6 +1165,27 @@ try {
   await removeUserPhone(db.collection('onboarding'));
   await removeUserPhone(db.collection('sessions'));
 
+  // Migrate onboarding phone numbers to broadcast_list, then remove from onboarding
+  const onboardingWithPhone = db.collection('onboarding').find({ phone: { $exists: true } });
+  let broadcastMigrated = 0;
+  for await (const doc of onboardingWithPhone) {
+    if (doc.phone && doc.user_hash && doc.state === 'completed') {
+      await db.collection('broadcast_list').updateOne(
+        { user_hash: doc.user_hash },
+        { $set: { phone: doc.phone, updated_at: new Date() } },
+        { upsert: true }
+      );
+      broadcastMigrated++;
+    }
+    await db.collection('onboarding').updateOne(
+      { _id: doc._id },
+      { $unset: { phone: "" } }
+    );
+  }
+  if (broadcastMigrated > 0) {
+    console.log(`[MIGRATE] Migrated ${broadcastMigrated} phone numbers from onboarding to broadcast_list`);
+  }
+
   // Backfill creditor_lower/debtor_lower for existing debt records (index-friendly queries)
   let debtsCount = 0;
   const debtsCursor = debts.find({
@@ -1221,6 +1241,13 @@ try {
 // Create indexes on sessions collection (phone_hash replaces phone for privacy)
 try {
   await db.collection('sessions').createIndex({ phone_hash: 1 }, { unique: true });
+} catch (err) {
+  if (err.code !== 86) throw err;
+}
+
+// Create indexes on broadcast_list collection
+try {
+  await db.collection('broadcast_list').createIndex({ user_hash: 1 }, { unique: true });
 } catch (err) {
   if (err.code !== 86) throw err;
 }

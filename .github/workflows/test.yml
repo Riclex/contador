@@ -34,10 +34,10 @@ jobs:
           node --check lib/cache.js
 
       - name: Run unit tests
-        run: node --test test/consent.test.js test/webhook.test.js test/parsers-emprestei.test.js
+        run: npm test
 
       - name: Run integration tests
         run: node --test test/integration/*.test.js
 
       - name: Run all tests
-        run: node --test test/consent.test.js test/webhook.test.js test/parsers-emprestei.test.js test/integration/*.test.js
+        run: npm run test:all

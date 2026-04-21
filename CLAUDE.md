@@ -64,7 +64,9 @@ In-memory LRU cache (1000 entries, 24h TTL) for parsed results; error responses 
 
 ## Session States
 
-`IDLE`, `AWAITING_CONSENT`, `ONBOARDING_COMPLETE`, `AWAITING_CONFIRMATION`, `AWAITING_DEBT_CONFIRMATION`, `AWAITING_DEBTOR_NAME`, `AWAITING_PAGO_CONFIRM`, `AWAITING_APAGAR_CONFIRM`, `AWAITING_DESFAZER_CONFIRM`
+`IDLE`, `AWAITING_CONFIRMATION`, `AWAITING_DEBT_CONFIRMATION`, `AWAITING_DEBTOR_NAME`, `AWAITING_PAGO_CONFIRM`, `AWAITING_APAGAR_CONFIRM`, `AWAITING_DESFAZER_CONFIRM`
+
+Onboarding states (stored in `onboarding` collection, separate from session): `AWAITING_CONSENT`, `COMPLETED`
 
 Commands typed during an active confirmation session reset the session to IDLE (prevents stale state misinterpretation).
 
@@ -159,6 +161,15 @@ node --check index.js
 }
 ```
 
+### Broadcast List Collection
+```javascript
+{
+  user_hash: string,        // SHA-256 hash of phone number (unique index)
+  phone: string,            // Raw phone for Twilio delivery (isolated PII)
+  updated_at: Date
+}
+```
+
 ### Events Collection (Audit Log)
 ```javascript
 {
@@ -189,10 +200,11 @@ node --check index.js
 
 Current Indexes:
 - `transactions`: `{ user_hash: 1, date: -1 }`, `{ message_sid: 1 }` (unique)
-- `debts`: `{ user_hash: 1, settled: 1 }`, `{ user_hash: 1, creditor: 1, debtor: 1 }`, `{ message_sid: 1 }` (unique)
+- `debts`: `{ user_hash: 1, settled: 1 }`, `{ user_hash: 1, creditor: 1, debtor: 1 }`, `{ user_hash: 1, creditor_lower: 1 }`, `{ user_hash: 1, debtor_lower: 1 }`, `{ message_sid: 1 }` (unique)
 - `sessions`: `{ phone_hash: 1 }` (unique), `{ updatedAt: 1 }` (TTL 1800s)
 - `events`: `{ event_name: 1, timestamp: -1 }`, `{ user_hash: 1, timestamp: -1 }`, `{ timestamp: 1 }` (partial TTL on `data_deleted` — 2 year retention)
 - `rate_limits`: `{ resetAt: 1 }` (TTL auto-delete)
+- `broadcast_list`: `{ user_hash: 1 }` (unique)
 - `_migrations`: no special indexes
 
 ## Cost Optimization
