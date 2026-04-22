@@ -58,7 +58,8 @@ In-memory LRU cache (1000 entries, 24h TTL) for parsed results; error responses 
 - `/termos` — Terms of use
 
 ### Admin Commands
-- `/stats` — Daily metrics (authorized phone numbers only)
+- `/stats` — Daily metrics with yesterday comparison, financial totals, command breakdown (authorized phone numbers only)
+- `/metricas` — 7-day trend table with financial totals and OpenAI stats (admin only)
 - `/retencao` — Retention analytics with day-1/7/30 cohorts (admin only)
 - `/anunciar <text>` — Broadcast message to all consented users (admin only)
 
@@ -174,9 +175,30 @@ node --check index.js
 ```javascript
 {
   user_hash: string,
-  event_name: string,       // 'first_use', 'consent_given', 'message_sent', 'transaction_confirmed', 'debt_created', etc.
+  event_name: string,       // 'first_use', 'consent_given', 'message_sent', 'transaction_confirmed', 'debt_created', 'openai_call', 'openai_cache_hit', etc.
   event_data: object,
   timestamp: Date
+}
+```
+
+### Daily Metrics Collection
+```javascript
+{
+  _id: string,              // Angola date string "YYYY-MM-DD" (unique index)
+  date: string,             // Same as _id for convenience
+  newUsers: number,
+  activeUsers: number,
+  returningUsers: number,   // Users active today who were away for 7+ days
+  totalMessages: number,
+  confirmedTransactions: number,
+  debtsCreated: number,
+  totalIncome: number,      // Aggregate Kz from income transactions
+  totalExpense: number,     // Aggregate Kz from expense transactions
+  debtsSettled: number,     // Debts marked as paid
+  commandsUsed: object,     // { hoje: 4, resumo: 3, ... } per-command breakdown
+  openaiCalls: number,      // OpenAI API calls (cache misses)
+  openaiCacheHits: number,  // Cache hits avoiding OpenAI calls
+  computedAt: Date          // When this snapshot was computed
 }
 ```
 
@@ -205,6 +227,7 @@ Current Indexes:
 - `events`: `{ event_name: 1, timestamp: -1 }`, `{ user_hash: 1, timestamp: -1 }`, `{ timestamp: 1 }` (partial TTL on `data_deleted` — 2 year retention)
 - `rate_limits`: `{ resetAt: 1 }` (TTL auto-delete)
 - `broadcast_list`: `{ user_hash: 1 }` (unique)
+- `daily_metrics`: `{ _id: 1 }` (unique)
 - `_migrations`: no special indexes
 
 ## Cost Optimization

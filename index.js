@@ -12,14 +12,24 @@ import rateLimit from 'express-rate-limit';
 import { normalize, parseTransactionRegex, parseDebtRegex, INCOME_VERBS, EXPENSE_VERBS, DEBT_VERBS_RECEBIDO, DEBT_VERBS_DEVIDO } from './lib/parsers.js';
 import { hashPhone, sanitizeInput, isValidWhatsAppPhone, sanitizeForPrompt, MAX_OPENAI_INPUT_LENGTH, getAngolaMidnightUTC, ANGOLA_OFFSET_MS, MAX_AMOUNT, isAffirmative, isNegative, isConfirmationWord, formatKz, SessionState, OnboardingState, isValidDebtName, validateTransactionResponse, validateDebtResponse } from './lib/security.js';
 import { getCacheKey, getCachedResponse, setCachedResponse, getCacheStats } from './lib/cache.js';
-import { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleDebtParse, handleTransactionParse } from './lib/commands.js';
+import { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleDebtParse, handleTransactionParse, handleMetricas } from './lib/commands.js';
+import { computeDailyMetrics, getOrCreateSnapshot, getRecentSnapshots, formatDelta } from './lib/metrics.js';
+import { trackOpenAICall, getOpenAIStats } from './lib/cache.js';
 
 // --- Angola timezone helper (imported from lib/security.js)
 
 
 // --- Rate Limiting (MongoDB-backed, persists across restarts)
 const MAX_MESSAGES_PER_USER_PER_DAY = 50;
-let rateLimits = null; // MongoDB collection — initialized during startup
+
+// --- MongoDB collections (declared before functions that reference them) ---
+let rateLimits = null;
+let dailyMetrics = null;
+let db = null;
+let transactions = null;
+let debts = null;
+let events = null;
+
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes (used by both app logic and MongoDB TTL index)
 const processingUsers = new Set(); // Per-user lock to prevent concurrent webhook processing
 
@@ -96,11 +106,12 @@ async function getEnhancedStats() {
 
 async function getRetentionData() {
   const today = getAngolaMidnightUTC();
+  const ninetyDaysAgo = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000);
 
   // Use server-side aggregation to avoid loading all events into memory
-  // Step 1: Group first_use events by Angola-date cohort
+  // Step 1: Group first_use events by Angola-date cohort (limited to last 90 days)
   const cohortAgg = await events.aggregate([
-    { $match: { event_name: 'first_use' } },
+    { $match: { event_name: 'first_use', timestamp: { $gte: ninetyDaysAgo } } },
     { $group: {
       _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp', timezone: 'Africa/Luanda' } },
       users: { $addToSet: '$user_hash' },
@@ -111,8 +122,9 @@ async function getRetentionData() {
 
   if (cohortAgg.length === 0) return { totalUsers: 0, cohorts: [] };
 
-  // Step 2: Get last activity per user (server-side, only what's needed)
+  // Step 2: Get last activity per user (limited to last 90 days for scalability)
   const allActivity = await events.aggregate([
+    { $match: { timestamp: { $gte: ninetyDaysAgo } } },
     { $group: { _id: '$user_hash', lastActive: { $max: '$timestamp' } } }
   ]).toArray();
   const userActivity = new Map(allActivity.map(u => [u._id, u.lastActive]));
@@ -275,11 +287,7 @@ function isAdmin(phone) {
 const mongo = new MongoClient(process.env.MONGODB_URI);
 
 // MongoDB connection retry with exponential backoff
-// (mongoConnected, serverReady, transactionsSupported declared at module level above)
-let db = null;
-let transactions = null;
-let debts = null;
-let events = null;
+// (mongoConnected, serverReady, transactionsSupported, db, transactions, debts, events declared at module level above)
 let mongoRetryCount = 0;
 const MAX_MONGO_RETRIES = 10;
 
@@ -475,23 +483,24 @@ async function parseDebt(text) {
   const cached = getCachedResponse(text, 'debt');
   if (cached) {
     console.log('Cache hit for debt');
-    return cached;
+    return { ...cached, source: 'cache' };
   }
 
   // Try regex first (fast, free)
   const regexResult = parseDebtRegex(text);
   if (regexResult.error !== 'ambiguous') {
     setCachedResponse(text, 'debt', regexResult);
-    return regexResult;
+    return { ...regexResult, source: 'regex' };
   }
 
   // Fallback to OpenAI for ambiguous cases
   console.log('Cache miss - calling OpenAI for debt');
+  trackOpenAICall(false);
   const result = await parseDebtOpenAI(text);
   if (!result.error) {
     setCachedResponse(text, 'debt', result);
   }
-  return result;
+  return { ...result, source: 'openai' };
 }
 
 // --- Session Management (MongoDB-based persistence)
@@ -548,31 +557,32 @@ async function parseTransaction(text) {
   const cached = getCachedResponse(text, 'transaction');
   if (cached) {
     console.log('Cache hit for transaction');
-    return cached;
+    return { ...cached, source: 'cache' };
   }
 
   // Try regex first (fast, free)
   const regexResult = parseTransactionRegex(text);
   if (regexResult.error !== 'ambiguous') {
     setCachedResponse(text, 'transaction', regexResult);
-    return regexResult;
+    return { ...regexResult, source: 'regex' };
   }
 
   // Fallback to OpenAI for ambiguous cases
   console.log('Cache miss - calling OpenAI for transaction');
+  trackOpenAICall(false);
   const result = await callOpenAI(
     TRANSACTION_SYSTEM_PROMPT,
     `Extrai uma transação financeira desta frase:\n"${sanitizeForPrompt(text)}"`,
     { temperature: 0 }
   );
-  if (result.error) return result;
+  if (result.error) return { ...result, source: 'openai' };
   const validated = validateTransactionResponse(result);
   if (validated.error) {
     console.error('[OpenAI] Malformed transaction response:', JSON.stringify(result));
-    return validated;
+    return { ...validated, source: 'openai' };
   }
   setCachedResponse(text, 'transaction', validated);
-  return validated;
+  return { ...validated, source: 'openai' };
 }
 
 const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER || "whatsapp:+14155238886";
@@ -811,7 +821,7 @@ Experimenta mandar algo como:
   }
 
   // Log message_sent event (after consent check — only for consenting users)
-  await logEvent('message_sent', from, { message_length: rawText.length, message_type: 'unknown' });
+  await logEvent('message_sent', from, { message_length: rawText.length, message_type: 'inbound' });
 
   // Retry protection
   if (!messageSid) {
@@ -895,6 +905,10 @@ Experimenta mandar algo como:
     adminNumbers: ADMIN_NUMBERS,
     getEnhancedStats,
     getRetentionData,
+    dailyMetrics,
+    computeDailyMetrics: () => computeDailyMetrics(events, transactions, debts),
+    getOrCreateSnapshot: (date) => getOrCreateSnapshot(dailyMetrics, events, transactions, debts, date),
+    getRecentSnapshots: (days) => getRecentSnapshots(dailyMetrics, events, transactions, debts, days),
     sendWhatsApp: async (to, body) => {
       await twilioClient.messages.create({ from: TWILIO_WHATSAPP_NUMBER, to, body });
     },
@@ -941,6 +955,11 @@ Experimenta mandar algo como:
 
   if (text === "/retencao") {
     await handleRetencao(ctx);
+    return res.sendStatus(204);
+  }
+
+  if (text === "/metricas") {
+    await handleMetricas(ctx);
     return res.sendStatus(204);
   }
 
@@ -1050,6 +1069,7 @@ Experimenta mandar algo como:
 // Global error handler - catches unhandled errors from async route handlers
 app.use((err, req, res, next) => {
   console.error(`[ERROR] Unhandled error on ${req.method} ${req.path}:`, err.message);
+  console.error(err.stack);
   if (!res.headersSent) {
     res.status(500).send('Internal Server Error');
   }
@@ -1067,6 +1087,7 @@ transactions = db.collection("transactions");
 debts = db.collection("debts");
 events = db.collection("events");
 rateLimits = db.collection("rate_limits");
+dailyMetrics = db.collection("daily_metrics");
 
 // Monitor connection health
 let reconnectInProgress = false;
@@ -1088,6 +1109,9 @@ mongo.on('close', () => {
 // --- Database indexes
 // Rate limit TTL index — expired entries auto-deleted by MongoDB
 try { await rateLimits.createIndex({ resetAt: 1 }, { expireAfterSeconds: 0 }); } catch (err) { if (err.code !== 86) throw err; }
+
+// Daily metrics collection — unique index on date string _id
+try { await dailyMetrics.createIndex({ _id: 1 }, { unique: true }); } catch (err) { if (err.code !== 86) throw err; }
 
 // --- Event Tracking System
 try { await events.createIndex({ event_name: 1, timestamp: -1 }); } catch (err) { if (err.code !== 86) throw err; }
