@@ -12,7 +12,7 @@ O **Contador** é um assistente financeiro via WhatsApp que permite aos usuário
 
 | Dado | Finalidade | Base Legal |
 |------|------------|------------|
-| **Número de telefone WhatsApp** (armazenado com hash SHA-256 em todas as coleções, incluindo limitação de uso) | Identificação única do usuário / Prevenção de abuso | Consentimento / Interesse legítimo (limitação de uso) |
+| **Número de telefone WhatsApp** (armazenado com hash SHA-256 em todas as coleções, exceto `broadcast_list` onde é guardado em texto claro apenas para entrega de anúncios) | Identificação única do usuário / Prevenção de abuso | Consentimento / Interesse legítimo (limitação de uso) |
 | **Transações** (vendas, gastos, descrições) | Fornecer resumos de saldo e histórico | Consentimento |
 | **Dívidas** (credor, devedor, valores, descrições) | Rastrear e gerenciar dívidas | Consentimento |
 | **Eventos de auditoria** (primeiro uso, consentimento, mensagens enviadas) | Compliance e segurança | Legítimo interesse |
@@ -62,7 +62,7 @@ Nos termos da Lei 22/11, você tem direito a:
 | **Retificação** | Envie mensagens corrigindo informações incorretas |
 | **Eliminação (Direito ao Esquecimento)** | Comando `/apagar` - deleta permanentemente todos os dados |
 | **Oposição** | Comando `/apagar` - cessa todo processamento de dados |
-| **Portabilidade** | Comando `/exportar` - exporta todos os dados diretamente no bot |
+| **Portabilidade** | Comando `/exportar` - exporta todos os dados em formato legível; `/exportar json` - formato JSON para portabilidade |
 
 ## 5. Armazenamento de Dados
 
@@ -88,7 +88,7 @@ Os dados são armazenados no **MongoDB Atlas** com servidores localizados na **U
 
 Implementamos as seguintes medidas técnicas e organizacionais:
 
-- **Pseudonimização:** Números de telefone armazenados exclusivamente com hash SHA-256 em todas as coleções (transações, dívidas, eventos, sessões e onboarding)
+- **Pseudonimização:** Números de telefone armazenados com hash SHA-256 em todas as coleções (transações, dívidas, eventos, sessões e onboarding). Exceção: a coleção `broadcast_list` armazena o número em texto claro, isolado das outras coleções, exclusivamente para entrega de anúncios via `/anunciar`. Este número é eliminado ao usar `/apagar`.
 - **Criptografia em trânsito:** HTTPS/TLS para todas as comunicações
 - **Verificação de assinatura:** Validação SHA256 obrigatória de webhooks Twilio (sem caminho de bypass)
 - **Sanitização de input:** Remoção de caracteres de controle, caracteres de largura zero e overrides direcionais Unicode
@@ -126,7 +126,7 @@ Estas transferências são necessárias para a prestação do serviço e contam 
 | Comando | Ação |
 |---------|------|
 | `/meusdados` | Visualizar todos os dados armazenados |
-| `/exportar` | Exportar todos os dados para portabilidade |
+| `/exportar` | Exportar todos os dados em formato legível; `/exportar json` para formato JSON |
 | `/apagar` | Deletar permanentemente todos os dados de forma atômica (incluindo registos de limitação de uso) |
 
 ### 7.2 Contato com a Administração

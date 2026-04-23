@@ -14,7 +14,7 @@ import { hashPhone, sanitizeInput, isValidWhatsAppPhone, sanitizeForPrompt, MAX_
 import { getCacheKey, getCachedResponse, setCachedResponse, getCacheStats } from './lib/cache.js';
 import { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleDebtParse, handleTransactionParse, handleMetricas } from './lib/commands.js';
 import { computeDailyMetrics, getOrCreateSnapshot, getRecentSnapshots, formatDelta } from './lib/metrics.js';
-import { trackOpenAICall, getOpenAIStats } from './lib/cache.js';
+import { trackOpenAICall, getOpenAIStats, isOpenAICapReached } from './lib/cache.js';
 
 // --- Angola timezone helper (imported from lib/security.js)
 
@@ -243,12 +243,12 @@ const healthLimiter = rateLimit({
 });
 app.get("/health", healthLimiter, (_, res) => {
   if (!serverReady) {
-    return res.status(503).json({ status: "starting", mongodb: "disconnected" });
+    return res.status(503).json({ status: "starting", mongodb: "disconnected", openai: openaiHealthy ? "unknown" : "degraded" });
   }
   if (!mongoConnected) {
-    return res.status(503).json({ status: "unhealthy", mongodb: "disconnected" });
+    return res.status(503).json({ status: "unhealthy", mongodb: "disconnected", openai: openaiHealthy ? "unknown" : "degraded" });
   }
-  res.json({ status: "ok", mongodb: "connected" });
+  res.json({ status: "ok", mongodb: "connected", openai: openaiHealthy ? "connected" : "degraded" });
 });
 
 if (isMainModule) {
@@ -260,17 +260,11 @@ app.use(bodyParser.urlencoded({
 }));
 
 // --- Environment Validation
-const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"];
+const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "WEBHOOK_URL"];
 const missing = requiredEnvVars.filter((key) => !process.env[key]);
 if (missing.length > 0) {
   console.error(`Missing required environment variables: ${missing.join(", ")}`);
   process.exit(1);
-}
-
-// WEBHOOK_URL is strongly recommended — without it, signature verification falls back
-// to header-based URL reconstruction which may fail behind misconfigured proxies
-if (!process.env.WEBHOOK_URL) {
-  console.warn('[WARN] WEBHOOK_URL not set — Twilio signature verification will use header-based URL reconstruction. Set WEBHOOK_URL for production deployments.');
 }
 
 // Admin phone numbers for /stats command (required, no defaults)
@@ -331,7 +325,7 @@ const twilioClient = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
-const OPENAI_TIMEOUT_MS = 10000; // 10 second timeout
+const OPENAI_TIMEOUT_MS = 15000; // 15 second timeout
 
 // --- OpenAI System Prompts ---
 const DEBT_SYSTEM_PROMPT = "You are a strict debt tracking message parser. \
@@ -429,7 +423,11 @@ Output: {'type':'expense','amount':500,'description':'saldo'}\
 
 // --- Shared OpenAI caller (deduplicates timeout/error-handling boilerplate) ---
 async function callOpenAI(systemPrompt, userPrompt, { temperature = 0 } = {}) {
-  openaiHealthy = true;
+  // Safety valve: check daily OpenAI cost cap
+  if (isOpenAICapReached()) {
+    console.warn('[OPENAI] Daily cost cap reached. Falling back to regex-only.');
+    return { error: 'ambiguous' };
+  }
   let timeoutId;
   const openaiPromise = openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -448,12 +446,16 @@ async function callOpenAI(systemPrompt, userPrompt, { temperature = 0 } = {}) {
       })
     ]);
     clearTimeout(timeoutId);
+    openaiConsecutiveFailures = 0;
     openaiHealthy = true;
     return JSON.parse(response.choices[0].message.content);
   } catch (error) {
     clearTimeout(timeoutId);
     openaiPromise.catch(() => {}); // Neutralize losing promise rejection
-    openaiHealthy = false;
+    openaiConsecutiveFailures++;
+    if (openaiConsecutiveFailures >= OPENAI_FAILURE_THRESHOLD) {
+      openaiHealthy = false;
+    }
     console.error('OpenAI API error:', error.message);
     if (error.message === 'OpenAI timeout') return { error: 'service_unavailable' };
     if (error instanceof SyntaxError) return { error: 'ambiguous' };
@@ -461,6 +463,8 @@ async function callOpenAI(systemPrompt, userPrompt, { temperature = 0 } = {}) {
   }
 }
 let openaiHealthy = true; // Track OpenAI connectivity for health check
+let openaiConsecutiveFailures = 0;
+const OPENAI_FAILURE_THRESHOLD = 3; // Mark unhealthy after 3 consecutive failures
 
 
 async function parseDebtOpenAI(text) {
@@ -519,6 +523,11 @@ async function getSession(phone) {
     return null;
   }
 
+  // Initialize version for optimistic locking if missing
+  if (typeof doc.version !== 'number') {
+    doc.version = 0;
+  }
+
   return doc;
 }
 
@@ -527,14 +536,16 @@ async function setSession(phone, sessionData) {
   if (!mongoConnected) {
     // Fallback to in-memory if MongoDB is not connected
     sessions[phoneHash] = { ...sessionData, updatedAt: Date.now() };
-    return;
+    return { modifiedCount: 1 };
   }
 
-  await db.collection('sessions').updateOne(
-    { phone_hash: phoneHash },
-    { $set: { ...sessionData, phone_hash: phoneHash, updatedAt: new Date() } },
+  const currentVersion = typeof sessionData.version === 'number' ? sessionData.version : 0;
+  const result = await db.collection('sessions').updateOne(
+    { phone_hash: phoneHash, version: currentVersion },
+    { $set: { ...sessionData, phone_hash: phoneHash, updatedAt: new Date() }, $inc: { version: 1 } },
     { upsert: true }
   );
+  return result;
 }
 
 async function deleteSession(phone) {
@@ -851,7 +862,19 @@ Experimenta mandar algo como:
   async function saveSessionIfDirty() {
     if (sessionDirty) {
       try {
-        await setSession(from, sessions[sessionKey]);
+        const result = await setSession(from, sessions[sessionKey]);
+        if (result.modifiedCount === 0 && result.upsertedCount === 0) {
+          // Version conflict — reload from MongoDB and retry once
+          console.warn('[SESSION] Version conflict detected, reloading session');
+          const fresh = await getSession(from);
+          sessions[sessionKey] = fresh || { state: SessionState.IDLE, updatedAt: new Date() };
+          // Retry save with fresh version
+          const retryResult = await setSession(from, sessions[sessionKey]);
+          if (retryResult.modifiedCount === 0 && retryResult.upsertedCount === 0) {
+            console.error('[SESSION] Failed to save session after retry');
+            return;
+          }
+        }
         sessionDirty = false;
       } catch (err) {
         console.error('[SESSION] Failed to save session to MongoDB:', err.message);
@@ -865,6 +888,10 @@ Experimenta mandar algo como:
   }
   if (!session) {
     session = mongoSession || { state: SessionState.IDLE, updatedAt: new Date() };
+    sessions[sessionKey] = { ...session }; // Clone to avoid shared reference
+  } else {
+    // Clone in-memory session to prevent concurrent handlers from sharing state
+    session = { ...session };
     sessions[sessionKey] = session;
   }
 
@@ -1331,7 +1358,7 @@ openaiHealthTimer.unref(); // Don't prevent process exit
 // --- Graceful shutdown
 let serverClosing = false;
 
-async function gracefulShutdown() {
+async function gracefulShutdown(forceExitDelayMs = 10000) {
   if (serverClosing) return;
   serverClosing = true;
   console.log('Shutting down gracefully...');
@@ -1347,11 +1374,11 @@ async function gracefulShutdown() {
     process.exit(0);
   });
 
-  // Force exit after 10s if in-flight requests don't drain
+  // Force exit after timeout if in-flight requests don't drain
   setTimeout(() => {
-    console.error('Forced shutdown after 10s timeout');
+    console.error(`Forced shutdown after ${forceExitDelayMs}ms timeout`);
     process.exit(1);
-  }, 10000);
+  }, forceExitDelayMs);
 }
 
 process.on('SIGTERM', gracefulShutdown);
@@ -1360,9 +1387,9 @@ process.on('SIGINT', gracefulShutdown);
 // Prevent unhandled rejections and exceptions from crashing the process silently
 process.on('unhandledRejection', (reason) => {
   console.error('[FATAL] Unhandled promise rejection:', reason);
-  // unhandledRejection: log and continue. These are typically from background operations
-  // (health checks, reconnects) where losing the process is worse than logging the error.
-  // Route-level rejections are caught by asyncHandler.
+  // Unhandled rejections can leave the process in an inconsistent state.
+  // Exit gracefully after a short delay to allow in-flight operations to complete.
+  gracefulShutdown(5);
 });
 process.on('uncaughtException', (error) => {
   console.error('[FATAL] Uncaught exception:', error);

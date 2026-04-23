@@ -43,7 +43,7 @@
   </thead>
   <tbody>
     <tr>
-      <td><strong>Número de telefone WhatsApp</strong> (armazenado exclusivamente com hash SHA-256 em todas as coleções)</td>
+      <td><strong>Número de telefone WhatsApp</strong> (armazenado com hash SHA-256 em todas as coleções, exceto <code>broadcast_list</code> onde é guardado em texto claro apenas para entrega de anúncios)</td>
       <td>Identificação única do usuário</td>
       <td>Consentimento</td>
     </tr>
@@ -144,7 +144,7 @@
     </tr>
     <tr>
       <td><strong>Portabilidade</strong></td>
-      <td>Comando <code>/exportar</code> - exporta todos os dados diretamente no bot</td>
+      <td>Comando <code>/exportar</code> - exporta todos os dados em formato legível; <code>/exportar json</code> - formato JSON para portabilidade</td>
     </tr>
   </tbody>
 </table>
@@ -195,7 +195,7 @@
 <p>Implementamos as seguintes medidas técnicas e organizacionais:</p>
 
 <ul>
-  <li><strong>Pseudonimização:</strong> Números de telefone armazenados exclusivamente com hash SHA-256 em todas as coleções (transações, dívidas, eventos, sessões e onboarding)</li>
+  <li><strong>Pseudonimização:</strong> Números de telefone armazenados com hash SHA-256 em todas as coleções (transações, dívidas, eventos, sessões e onboarding). Exceção: a coleção <code>broadcast_list</code> armazena o número em texto claro, isolado das outras coleções, exclusivamente para entrega de anúncios via <code>/anunciar</code>. Este número é eliminado ao usar <code>/apagar</code>.</li>
   <li><strong>Criptografia em trânsito:</strong> HTTPS/TLS para todas as comunicações</li>
   <li><strong>Verificação de assinatura:</strong> Validação SHA256 obrigatória de webhooks Twilio (sem caminho de bypass)</li>
   <li><strong>Sanitização de input:</strong> Remoção de caracteres de controle, caracteres de largura zero e overrides direcionais Unicode</li>
@@ -267,7 +267,7 @@
     </tr>
     <tr>
       <td><code>/exportar</code></td>
-      <td>Exportar todos os dados para portabilidade</td>
+      <td>Exportar todos os dados em formato legível; <code>/exportar json</code> para formato JSON</td>
     </tr>
     <tr>
       <td><code>/apagar</code></td>
