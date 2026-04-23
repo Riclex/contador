@@ -260,10 +260,22 @@ app.use(bodyParser.urlencoded({
 }));
 
 // --- Environment Validation
-const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "WEBHOOK_URL"];
+const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"];
 const missing = requiredEnvVars.filter((key) => !process.env[key]);
 if (missing.length > 0) {
   console.error(`Missing required environment variables: ${missing.join(", ")}`);
+  process.exit(1);
+}
+
+// Auto-construct WEBHOOK_URL on Railway (RAILWAY_PUBLIC_DOMAIN is injected automatically)
+if (!process.env.WEBHOOK_URL && process.env.RAILWAY_PUBLIC_DOMAIN) {
+  process.env.WEBHOOK_URL = `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/webhook`;
+  console.log(`[ENV] Auto-configured WEBHOOK_URL from Railway domain: ${process.env.WEBHOOK_URL}`);
+}
+
+// WEBHOOK_URL is required for correct Twilio signature verification
+if (!process.env.WEBHOOK_URL) {
+  console.error('[FATAL] WEBHOOK_URL not set and RAILWAY_PUBLIC_DOMAIN not available. Set WEBHOOK_URL explicitly for correct Twilio signature verification.');
   process.exit(1);
 }
 
