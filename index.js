@@ -1389,7 +1389,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('[FATAL] Unhandled promise rejection:', reason);
   // Unhandled rejections can leave the process in an inconsistent state.
   // Exit gracefully after a short delay to allow in-flight operations to complete.
-  gracefulShutdown(5);
+  gracefulShutdown(5000);
 });
 process.on('uncaughtException', (error) => {
   console.error('[FATAL] Uncaught exception:', error);
