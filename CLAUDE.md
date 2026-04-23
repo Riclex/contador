@@ -227,7 +227,7 @@ Current Indexes:
 - `events`: `{ event_name: 1, timestamp: -1 }`, `{ user_hash: 1, timestamp: -1 }`, `{ timestamp: 1 }` (partial TTL on `data_deleted` — 2 year retention)
 - `rate_limits`: `{ resetAt: 1 }` (TTL auto-delete)
 - `broadcast_list`: `{ user_hash: 1 }` (unique)
-- `daily_metrics`: `{ _id: 1 }` (unique)
+- `daily_metrics`: `{ _id: 1 }` (auto-created, inherently unique)
 - `_migrations`: no special indexes
 
 ## Cost Optimization

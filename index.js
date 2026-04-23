@@ -1110,8 +1110,7 @@ mongo.on('close', () => {
 // Rate limit TTL index — expired entries auto-deleted by MongoDB
 try { await rateLimits.createIndex({ resetAt: 1 }, { expireAfterSeconds: 0 }); } catch (err) { if (err.code !== 86) throw err; }
 
-// Daily metrics collection — unique index on date string _id
-try { await dailyMetrics.createIndex({ _id: 1 }, { unique: true }); } catch (err) { if (err.code !== 86) throw err; }
+// Daily metrics collection — _id index is auto-created by MongoDB (inherently unique)
 
 // --- Event Tracking System
 try { await events.createIndex({ event_name: 1, timestamp: -1 }); } catch (err) { if (err.code !== 86) throw err; }
