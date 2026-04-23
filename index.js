@@ -267,16 +267,18 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-// Auto-construct WEBHOOK_URL on Railway (RAILWAY_PUBLIC_DOMAIN is injected automatically)
-if (!process.env.WEBHOOK_URL && process.env.RAILWAY_PUBLIC_DOMAIN) {
-  process.env.WEBHOOK_URL = `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/webhook`;
+// Auto-construct WEBHOOK_URL on Railway (injected automatically by the platform)
+const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_SERVICE_DOMAIN || process.env.RAILWAY_STATIC_URL;
+if (!process.env.WEBHOOK_URL && railwayDomain) {
+  process.env.WEBHOOK_URL = `https://${railwayDomain}/webhook`;
   console.log(`[ENV] Auto-configured WEBHOOK_URL from Railway domain: ${process.env.WEBHOOK_URL}`);
 }
 
-// WEBHOOK_URL is required for correct Twilio signature verification
+// WEBHOOK_URL is strongly recommended for correct Twilio signature verification.
+// Without it, the app falls back to header-based URL reconstruction which may fail
+// behind reverse proxies. The app will still start — this is a warning, not fatal.
 if (!process.env.WEBHOOK_URL) {
-  console.error('[FATAL] WEBHOOK_URL not set and RAILWAY_PUBLIC_DOMAIN not available. Set WEBHOOK_URL explicitly for correct Twilio signature verification.');
-  process.exit(1);
+  console.warn('[WARN] WEBHOOK_URL not set — Twilio signature verification will use header-based URL reconstruction. Set WEBHOOK_URL for production deployments.');
 }
 
 // Admin phone numbers for /stats command (required, no defaults)
