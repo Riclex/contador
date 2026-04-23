@@ -33,6 +33,11 @@ let events = null;
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes (used by both app logic and MongoDB TTL index)
 const processingUsers = new Set(); // Per-user lock to prevent concurrent webhook processing
 
+// --- OpenAI health tracking (declared before /health endpoint to avoid TDZ)
+let openaiHealthy = true;
+let openaiConsecutiveFailures = 0;
+const OPENAI_FAILURE_THRESHOLD = 3; // Mark unhealthy after 3 consecutive failures
+
 // --- Stats Cache (5 minute TTL)
 const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
 let statsCache = {
@@ -476,9 +481,6 @@ async function callOpenAI(systemPrompt, userPrompt, { temperature = 0 } = {}) {
     return { error: 'service_unavailable' };
   }
 }
-let openaiHealthy = true; // Track OpenAI connectivity for health check
-let openaiConsecutiveFailures = 0;
-const OPENAI_FAILURE_THRESHOLD = 3; // Mark unhealthy after 3 consecutive failures
 
 
 async function parseDebtOpenAI(text) {
