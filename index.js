@@ -1,4 +1,4 @@
-import "dotenv/config";
+﻿import "dotenv/config";
 import express from "express";
 import bodyParser from "body-parser";
 import { MongoClient } from "mongodb";
@@ -15,6 +15,7 @@ import { handleDebtParse, handleTransactionParse } from './lib/handlers/parsers.
 import { computeDailyMetrics, getOrCreateSnapshot, getRecentSnapshots } from './lib/metrics.js';
 import { parseDebt, parseTransaction, isOpenaiHealthy, startOpenaiHealthCheck } from './lib/openai.js';
 import { getSession, setSession, SESSION_TTL_MS, sessions } from './lib/session.js';
+import { createWebhookHandler } from './lib/webhook.js';
 
 // --- Angola timezone helper (imported from lib/security.js)
 
@@ -31,6 +32,14 @@ let debts = null;
 let events = null;
 
 const processingUsers = new Set(); // Per-user lock to prevent concurrent webhook processing
+
+// --- Mutable state container for webhook handler ---
+// serverReady/mongoConnected are read LIVE via deps.serverReady / deps.mongoConnected
+// in lib/webhook.js (not destructured at handler creation time).
+const deps = {
+  serverReady: false,
+  mongoConnected: false,
+};
 
 // SESSION_TTL_MS imported from lib/session.js
 // openaiHealthy managed by lib/openai.js (use isOpenaiHealthy() to read)
@@ -94,7 +103,8 @@ async function getEnhancedStats() {
       uptime: `${uptimeDays}d ${uptimeHours}h ${uptimeMins}m`,
       mongodb: mongoConnected ? '✅' : '❌',
       timestamp: new Date().toISOString()
-    }
+    },
+    auditTrail: { logEventFailures }
   };
 
   // Update cache
@@ -217,6 +227,9 @@ let serverReady = false;
 let transactionsSupported = false;
 let serverInstance = null; // Exposed for tests via getServerPort()
 
+// --- Audit trail monitoring
+let logEventFailures = 0; // Counter for failed event logging (exposed in /health and /stats)
+
 // --- Response Cache (imported from lib/cache.js)
 
 // --- Main module guard — server only starts when index.js is run directly, or in test mode
@@ -250,7 +263,7 @@ app.get("/health", healthLimiter, (_, res) => {
   if (!mongoConnected) {
     return res.status(503).json({ status: "unhealthy", mongodb: "disconnected", openai: isOpenaiHealthy() ? "unknown" : "degraded" });
   }
-  res.json({ status: "ok", mongodb: "connected", openai: isOpenaiHealthy() ? "connected" : "degraded" });
+  res.json({ status: "ok", mongodb: "connected", openai: isOpenaiHealthy() ? "connected" : "degraded", logEventFailures });
 });
 
 if (isMainModule) {
@@ -302,6 +315,7 @@ async function connectWithRetry() {
     try {
       await mongo.connect();
       mongoConnected = true;
+      deps.mongoConnected = true;
       mongoRetryCount = 0;
       console.log("Connected to MongoDB");
       return;
@@ -320,6 +334,7 @@ async function connectWithRetry() {
     try {
       await mongo.connect();
       mongoConnected = true;
+      deps.mongoConnected = true;
       mongoRetryCount = 0;
       console.log("Connected to MongoDB (slow retry)");
       return;
@@ -409,8 +424,8 @@ async function logEvent(eventName, userPhone, metadata = {}) {
       metadata
     }));
   } catch (err) {
-    // Fail silently - don't break user experience if logging fails
-    console.error('Event logging error:', err.message);
+    logEventFailures++;
+    console.error(`[AUDIT-TRAIL-GAP] Event "${eventName}" failed to log:`, err.message);
   }
 }
 
@@ -451,397 +466,22 @@ async function setOnboardingState(userPhone, state) {
   }
 }
 
+function normalizeOnboardingState(state) {
+  // Backward compatibility: old documents used lowercase values
+  if (state === 'awaiting_consent') return 'AWAITING_CONSENT';
+  if (state === 'completed') return 'COMPLETED';
+  return state;
+}
+
 async function getOnboardingState(userPhone) {
   const userHash = hashPhone(userPhone);
   const doc = await db.collection('onboarding').findOne({ user_hash: userHash });
-  return doc?.state || null;
+  return normalizeOnboardingState(doc?.state) || null;
 }
 
 // --- Routes
 // Wrap async handlers to forward rejected promises to Express error handler
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-
-app.post("/webhook", asyncHandler(async (req, res) => {
-  // Reject requests while server is still initializing (MongoDB not ready yet)
-  if (!serverReady) return res.sendStatus(503);
-  // Reject requests when MongoDB is disconnected after startup (prevents 500s and Twilio retry storms)
-  if (!mongoConnected) return res.sendStatus(503);
-
-  // Webhook timeout — Twilio times out at ~15s; fail fast if we can't respond in time
-  const WEBHOOK_TIMEOUT_MS = 12000;
-  const webhookTimeout = setTimeout(() => {
-    if (!res.headersSent) {
-      console.error('[WEBHOOK] Request timed out after 12s');
-      res.status(504).send('Gateway Timeout');
-    }
-  }, WEBHOOK_TIMEOUT_MS);
-  res.on('finish', () => clearTimeout(webhookTimeout));
-
-  // Webhook Signature Verification (Sprint 9 — Security)
-  // Skipped in test mode (NODE_ENV=test) to allow integration testing without Twilio credentials
-  const reqId = Math.random().toString(36).substring(2, 8);
-  req.reqId = reqId;
-
-  if (process.env.NODE_ENV !== 'test') {
-    const twilioSignature = req.headers['x-twilio-signature'];
-    if (!twilioSignature) {
-      console.error(`[WEBHOOK:${reqId}] Missing signature header from:`, req.ip);
-      return res.status(401).send('Missing signature');
-    }
-
-    // WEBHOOK_URL preferred for reliable signature verification; falls back to header-based URL
-    const url = process.env.WEBHOOK_URL || `${req.protocol}://${req.get('host')}/webhook`;
-
-    // Use Twilio's official validateRequest function
-    const isValid = twilio.validateRequest(
-      process.env.TWILIO_AUTH_TOKEN,
-      twilioSignature,
-      url,
-      req.body  // Parsed body object
-    );
-
-    if (!isValid) {
-      console.error(`[WEBHOOK:${reqId}] Invalid webhook signature from:`, req.ip);
-      console.error(`[WEBHOOK:${reqId}] URL:`, url);
-      return res.status(401).send('Invalid signature');
-    }
-
-    console.log(`[WEBHOOK:${reqId}] Signature verified successfully`);
-  }
-
-  const from = req.body.From;
-  const rawText = req.body.Body || "";
-
-  // Validate phone number format early (prevent NoSQL injection and hashPhone(undefined) crash)
-  if (!from || !isValidWhatsAppPhone(from)) {
-    console.error(`[WEBHOOK:${reqId}] Invalid phone number format:`, from);
-    return res.status(400).send('Invalid phone number');
-  }
-
-  const userHash = hashPhone(from);
-
-  // Reject excessively long messages (WhatsApp max is ~65K chars — no legitimate use case exceeds 2000)
-  const MAX_MESSAGE_LENGTH = 2000;
-  if (rawText.length > MAX_MESSAGE_LENGTH) {
-    console.warn(`[WEBHOOK:${reqId}] Message too long: ${rawText.length} chars from ${userHash}`);
-    return res.sendStatus(413);
-  }
-
-  // Input sanitization
-  const text = normalize(sanitizeInput(rawText));
-  const messageSid = req.body.MessageSid;
-
-  // Prevent concurrent processing of the same user (race condition on session state)
-  if (processingUsers.has(userHash)) return res.sendStatus(204);
-  processingUsers.add(userHash);
-  const userLockTimer = setTimeout(() => processingUsers.delete(userHash), 30000);
-
-  try {
-  // Rate limiting — check before logging events to avoid inflating stats
-  const rateLimit = await checkRateLimit(from);
-  if (!rateLimit.allowed) {
-    if (rateLimit.sendNotice) {
-      await reply(from, `Limite diário de mensagens atingido. Tente novamente amanhã.`);
-    }
-    return res.sendStatus(204);
-  }
-
-  // Parallelize: check onboarding state and load session simultaneously
-  const [onboardingState, mongoSession] = await Promise.all([
-    getOnboardingState(from),
-    getSession(db, mongoConnected, from)
-  ]);
-
-  // Handle consent flow (short-circuits for non-consenting users)
-  if (onboardingState === OnboardingState.AWAITING_CONSENT) {
-    if (isAffirmative(text)) {
-      await logEvent('first_use', from, { source: 'whatsapp' });
-      await logEvent('consent_given', from, {});
-      await setOnboardingState(from, OnboardingState.COMPLETED);
-      await replyWithRetry(from, `Perfeito! Podes começar a usar o Contador.
-
-Experimenta mandar algo como:
-• "vendi 5000 de pão"
-• "comprei 1000 de saldo"
-• "hoje" (para ver o saldo)`);
-      return res.sendStatus(204);
-    } else {
-      await replyWithRetry(from, `Preciso do teu consentimento para guardar os dados. Responde "sim" para continuar.`);
-      return res.sendStatus(204);
-    }
-  }
-
-  // Check if this is a new user (onboardingState is null when no record exists)
-  if (onboardingState === null) {
-    await setOnboardingState(from, OnboardingState.AWAITING_CONSENT);
-    await sendWelcomeMessage(from);
-    return res.sendStatus(204);
-  }
-
-  // Log message_sent event (after consent check — only for consenting users)
-  await logEvent('message_sent', from, { message_length: rawText.length, message_type: 'inbound' });
-
-  // Retry protection
-  if (!messageSid) {
-    return res.sendStatus(204);
-  }
-
-  if (processedMessages.has(messageSid)) {
-    return res.sendStatus(204);
-  }
-
-  processedMessages.add(messageSid);
-
-  while (processedMessages.size > MAX_PROCESSED_MESSAGES) {
-    const first = processedMessages.values().next().value;
-    processedMessages.delete(first);
-  }
-
-  // Load session (already fetched in parallel above)
-  const sessionKey = hashPhone(from); // Use hash as key — raw phone numbers never stored in memory
-  let session = sessions.get(sessionKey);
-  let sessionDirty = false; // Track whether session state changed (reduces MongoDB writes)
-
-  function markSessionDirty() {
-    sessionDirty = true;
-  }
-
-  async function saveSessionIfDirty() {
-    if (sessionDirty) {
-      try {
-        const result = await setSession(db, mongoConnected, from, sessions.get(sessionKey));
-        if (result.modifiedCount === 0 && result.upsertedCount === 0) {
-          // Version conflict — reload from MongoDB and retry once
-          console.warn('[SESSION] Version conflict detected, reloading session');
-          const fresh = await getSession(db, mongoConnected, from);
-          sessions.set(sessionKey, fresh || { state: SessionState.IDLE, updatedAt: new Date() });
-          // Retry save with fresh version
-          const retryResult = await setSession(db, mongoConnected, from, sessions.get(sessionKey));
-          if (retryResult.modifiedCount === 0 && retryResult.upsertedCount === 0) {
-            console.error('[SESSION] Failed to save session after retry');
-            return;
-          }
-        }
-        sessionDirty = false;
-      } catch (err) {
-        console.error('[SESSION] Failed to save session to MongoDB:', err.message);
-        // Keep sessionDirty = true so next request retries the write
-      }
-    }
-  }
-  if (session && session.updatedAt && Date.now() - new Date(session.updatedAt).getTime() > SESSION_TTL_MS) {
-    sessions.delete(sessionKey);
-    session = null;
-  }
-  if (!session) {
-    session = mongoSession || { state: SessionState.IDLE, updatedAt: new Date() };
-    sessions.set(sessionKey, { ...session }); // Clone to avoid shared reference
-  } else {
-    // Clone in-memory session to prevent concurrent handlers from sharing state
-    session = { ...session };
-    sessions.set(sessionKey, session);
-  }
-
-  // Reset session if user typed a command during an active confirmation flow
-  if (session.state !== SessionState.IDLE && !isConfirmationWord(text)) {
-    const isCommand = COMMANDS.has(text) || /^\/\w+\s+/.test(text);
-    if (isCommand) {
-      await reply(from, "Operação cancelada.");
-      markSessionDirty(); sessions.set(sessionKey, { state: SessionState.IDLE });
-      await saveSessionIfDirty();
-      session = sessions.get(sessionKey);
-    }
-  }
-
-  // --- Construct context for command/state handlers ---
-  const ctx = {
-    from,
-    text,
-    userHash,
-    messageSid,
-    sessionKey,
-    session,
-    sessions,
-    db,
-    transactions,
-    debts,
-    events,
-    rateLimits,
-    mongoClient: mongo,
-    transactionsSupported,
-    reply: (body) => reply(from, body),
-    replyWithRetry: (body) => replyWithRetry(from, body),
-    logEvent: (eventName, metadata) => logEvent(eventName, from, metadata),
-    markSessionDirty,
-    saveSessionIfDirty,
-    parseTransaction,
-    parseDebt,
-    adminNumbers: ADMIN_NUMBERS,
-    getEnhancedStats,
-    getRetentionData,
-    dailyMetrics,
-    computeDailyMetrics: () => computeDailyMetrics(events, transactions, debts),
-    getOrCreateSnapshot: (date) => getOrCreateSnapshot(dailyMetrics, events, transactions, debts, date),
-    getRecentSnapshots: (days) => getRecentSnapshots(dailyMetrics, events, transactions, debts, days),
-    sendWhatsApp: async (to, body) => {
-      await twilioClient.messages.create({ from: TWILIO_WHATSAPP_NUMBER, to, body });
-    },
-  };
-
-  // --- Command dispatch ---
-  if (text === "hoje" || text === "/hoje") {
-    await handleHoje(ctx);
-    return res.sendStatus(204);
-  }
-
-  const quemedeveMatch = text.match(/^\/quemedeve(?:\s+(\d+))?$/i);
-  if (quemedeveMatch) {
-    const page = parseInt(quemedeveMatch[1] || '1', 10);
-    await handleQuemedeve(ctx, page);
-    return res.sendStatus(204);
-  }
-
-  const quemdevoMatch = text.match(/^\/quemdevo(?:\s+(\d+))?$/i);
-  if (quemdevoMatch) {
-    const page = parseInt(quemdevoMatch[1] || '1', 10);
-    await handleQuemdevo(ctx, page);
-    return res.sendStatus(204);
-  }
-
-  const kilapiMatch = text.match(/^\/kilapi(?:\s+(\d+))?$/i);
-  if (kilapiMatch) {
-    const page = parseInt(kilapiMatch[1] || '1', 10);
-    await handleKilapi(ctx, page);
-    return res.sendStatus(204);
-  }
-
-  const pagoMatch = text.match(/^\/pago\s+(.+)/i);
-  if (pagoMatch) {
-    const name = pagoMatch[1].trim();
-    await handlePago(ctx, name);
-    return res.sendStatus(204);
-  }
-
-  if (text === "/stats") {
-    await handleStats(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text === "/retencao") {
-    await handleRetencao(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text === "/metricas") {
-    await handleMetricas(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text.startsWith("/anunciar ") || text === "/anunciar") {
-    await handleAnunciar(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text === "ajuda" || text === "/ajuda" || text === "comandos" || text === "/comandos") {
-    await handleAjuda(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text === "privacidade" || text === "/privacidade") {
-    await handlePrivacidade(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text === "termos" || text === "/termos") {
-    await handleTermos(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text === "meusdados" || text === "/meusdados") {
-    await handleMeusdados(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text === "apagar" || text === "/apagar") {
-    await handleApagar(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text === "desfazer" || text === "/desfazer") {
-    await handleDesfazer(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text === "/exportar") {
-    await handleExportar(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text.startsWith("/feedback ") || text === "/feedback") {
-    await handleFeedback(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text === "resumo" || text === "/resumo") {
-    await handleResumo(ctx);
-    return res.sendStatus(204);
-  }
-
-  if (text === "mes" || text === "/mes") {
-    await handleMes(ctx);
-    return res.sendStatus(204);
-  }
-
-  // --- Session state dispatch ---
-  switch (session.state) {
-
-  case SessionState.AWAITING_CONFIRMATION:
-    await handleAwaitingConfirmation(ctx);
-    return res.sendStatus(204);
-
-  case SessionState.AWAITING_DEBT_CONFIRMATION:
-    await handleAwaitingDebtConfirmation(ctx);
-    return res.sendStatus(204);
-
-  case SessionState.AWAITING_PAGO_CONFIRM:
-    await handleAwaitingPagoConfirm(ctx);
-    return res.sendStatus(204);
-
-  case SessionState.AWAITING_DEBTOR_NAME:
-    await handleAwaitingDebtorName(ctx);
-    return res.sendStatus(204);
-
-  case SessionState.AWAITING_APAGAR_CONFIRM:
-    await handleAwaitingApagarConfirm(ctx);
-    return res.sendStatus(204);
-
-  case SessionState.AWAITING_DESFAZER_CONFIRM:
-    await handleAwaitingDesfazerConfirm(ctx);
-    return res.sendStatus(204);
-
-  case SessionState.IDLE:
-  default: {
-    // Safety: catch unexpected state values and reset to IDLE
-    if (session.state !== SessionState.IDLE) {
-      console.warn(`[SESSION] Unexpected state ${session.state}, resetting to IDLE`);
-      markSessionDirty(); sessions.set(sessionKey, { state: SessionState.IDLE });
-      await saveSessionIfDirty();
-    }
-    // Try debt parsing first, then transaction parsing
-    const debtHandled = await handleDebtParse(ctx);
-    if (!debtHandled) {
-      await handleTransactionParse(ctx);
-    }
-    return res.sendStatus(204);
-  }
-  }
-  } finally {
-    clearTimeout(userLockTimer);
-    processingUsers.delete(userHash);
-  }
-
-}));
-
 // Global error handler - catches unhandled errors from async route handlers
 app.use((err, req, res, _next) => {
   console.error(`[ERROR] Unhandled error on ${req.method} ${req.path}:`, err.message);
@@ -870,6 +510,7 @@ dailyMetrics = db.collection("daily_metrics");
 let reconnectInProgress = false;
 mongo.on('close', () => {
   mongoConnected = false;
+  deps.mongoConnected = false;
   console.warn('MongoDB connection closed. Attempting reconnection...');
   // Prevent concurrent reconnection attempts
   if (!reconnectInProgress) {
@@ -975,7 +616,7 @@ try {
   const onboardingWithPhone = db.collection('onboarding').find({ phone: { $exists: true } });
   let broadcastMigrated = 0;
   for await (const doc of onboardingWithPhone) {
-    if (doc.phone && doc.user_hash && doc.state === 'completed') {
+    if (doc.phone && doc.user_hash && (doc.state === OnboardingState.COMPLETED || doc.state === 'completed')) {
       await db.collection('broadcast_list').updateOne(
         { user_hash: doc.user_hash },
         { $set: { phone: doc.phone, updated_at: new Date() } },
@@ -1090,8 +731,45 @@ try {
   console.warn('[DB] Could not detect MongoDB transaction support:', err.message);
 }
 
+// --- Populate deps and register webhook route (after all init is complete) ---
+Object.assign(deps, {
+  db, transactions, debts, events, rateLimits, dailyMetrics,
+  sessions, processingUsers, processedMessages, MAX_PROCESSED_MESSAGES,
+  SESSION_TTL_MS, ADMIN_NUMBERS, TWILIO_WHATSAPP_NUMBER,
+  mongo, transactionsSupported,
+  checkRateLimit, reply, replyWithRetry, logEvent,
+  getOnboardingState, setOnboardingState, sendWelcomeMessage,
+  getSession, setSession,
+  commandHandlers: {
+    handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago,
+    handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade,
+    handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo,
+    handleMes, handleFeedback, handleExportar, handleMetricas,
+  },
+  stateHandlers: {
+    handleAwaitingConfirmation, handleAwaitingDebtConfirmation,
+    handleAwaitingPagoConfirm, handleAwaitingDebtorName,
+    handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm,
+  },
+  parseHandlers: {
+    handleDebtParse, handleTransactionParse,
+  },
+  parseTransaction, parseDebt, COMMANDS,
+  getEnhancedStats, getRetentionData,
+  computeDailyMetrics, getOrCreateSnapshot, getRecentSnapshots,
+  twilioClient, twilio,
+  hashPhone, sanitizeInput, isValidWhatsAppPhone, normalize,
+  isAffirmative, isConfirmationWord, SessionState, OnboardingState,
+  logEventFailures,
+});
+deps.mongoConnected = mongoConnected; // Sync live mutable state
+
+const webhookHandler = createWebhookHandler(deps);
+app.post("/webhook", asyncHandler(webhookHandler));
+
 // --- All startup complete — server is now ready to handle requests
 serverReady = true;
+deps.serverReady = true;
 console.log('Server ready — all startup complete');
 
 // Proactive OpenAI health check (managed by lib/openai.js)

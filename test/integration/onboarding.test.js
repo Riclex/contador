@@ -21,8 +21,8 @@ describe('Onboarding Integration Tests', () => {
 
   describe('OnboardingState enum', () => {
     it('has correct state values', () => {
-      assert.equal(OnboardingState.AWAITING_CONSENT, 'awaiting_consent');
-      assert.equal(OnboardingState.COMPLETED, 'completed');
+      assert.equal(OnboardingState.AWAITING_CONSENT, 'AWAITING_CONSENT');
+      assert.equal(OnboardingState.COMPLETED, 'COMPLETED');
     });
 
     it('states are frozen strings', () => {
