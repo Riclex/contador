@@ -31,7 +31,7 @@ describe('Transaction Integration Tests', () => {
       state: SessionState.AWAITING_CONFIRMATION,
       pending: { type: 'income', amount: 5000, description: 'pao' }
     };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
 
     await handleAwaitingConfirmation(ctx);
 
@@ -41,7 +41,7 @@ describe('Transaction Integration Tests', () => {
     assert.equal(docs[0].amount, 5000);
     assert.equal(docs[0].description, 'pao');
     assert.ok(messages.some(m => m.body.includes('Registado')));
-    assert.equal(ctx.sessions[ctx.sessionKey].state, SessionState.IDLE);
+    assert.equal(ctx.sessions.get(ctx.sessionKey).state, SessionState.IDLE);
   });
 
   it('AWAITING_CONFIRMATION + "nao" cancels without inserting', async () => {
@@ -51,14 +51,14 @@ describe('Transaction Integration Tests', () => {
       state: SessionState.AWAITING_CONFIRMATION,
       pending: { type: 'expense', amount: 1000, description: 'saldo' }
     };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
 
     await handleAwaitingConfirmation(ctx);
 
     const docs = await transactions.find({ user_hash: ctx.userHash }).toArray();
     assert.equal(docs.length, 0);
     assert.ok(messages.some(m => m.body.includes('Cancelado')));
-    assert.equal(ctx.sessions[ctx.sessionKey].state, SessionState.IDLE);
+    assert.equal(ctx.sessions.get(ctx.sessionKey).state, SessionState.IDLE);
   });
 
   it('AWAITING_CONFIRMATION + unrecognized text asks for clarification', async () => {
@@ -68,7 +68,7 @@ describe('Transaction Integration Tests', () => {
       state: SessionState.AWAITING_CONFIRMATION,
       pending: { type: 'income', amount: 5000, description: 'test' }
     };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
 
     await handleAwaitingConfirmation(ctx);
 
@@ -84,14 +84,14 @@ describe('Transaction Integration Tests', () => {
       state: SessionState.AWAITING_CONFIRMATION,
       pending: { type: 'income', amount: NaN, description: 'test' }
     };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
 
     await handleAwaitingConfirmation(ctx);
 
     const docs = await transactions.find({ user_hash: ctx.userHash }).toArray();
     assert.equal(docs.length, 0);
     assert.ok(messages.some(m => m.body.includes('inválido')));
-    assert.equal(ctx.sessions[ctx.sessionKey].state, SessionState.IDLE);
+    assert.equal(ctx.sessions.get(ctx.sessionKey).state, SessionState.IDLE);
   });
 
   it('hoje shows correct daily total', async () => {

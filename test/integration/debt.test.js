@@ -31,7 +31,7 @@ describe('Debt Integration Tests', () => {
       state: SessionState.AWAITING_DEBT_CONFIRMATION,
       pendingDebt: { type: 'recebido', creditor: 'user', debtor: 'João', amount: 2000, description: 'test' }
     };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
 
     await handleAwaitingDebtConfirmation(ctx);
 
@@ -42,7 +42,7 @@ describe('Debt Integration Tests', () => {
     assert.equal(docs[0].amount, 2000);
     assert.equal(docs[0].settled, false);
     assert.ok(messages.some(m => m.body.includes('Dívida registada') || m.body.includes('Registado')));
-    assert.equal(ctx.sessions[ctx.sessionKey].state, SessionState.IDLE);
+    assert.equal(ctx.sessions.get(ctx.sessionKey).state, SessionState.IDLE);
   });
 
   it('AWAITING_DEBT_CONFIRMATION + "nao" cancels without inserting', async () => {
@@ -52,7 +52,7 @@ describe('Debt Integration Tests', () => {
       state: SessionState.AWAITING_DEBT_CONFIRMATION,
       pendingDebt: { type: 'devido', creditor: 'Maria', debtor: 'user', amount: 1500, description: 'test' }
     };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
 
     await handleAwaitingDebtConfirmation(ctx);
 
@@ -90,7 +90,7 @@ describe('Debt Integration Tests', () => {
         amount: 2000
       }
     };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
     ctx.text = 'sim';
 
     await handleAwaitingPagoConfirm(ctx);
@@ -99,7 +99,7 @@ describe('Debt Integration Tests', () => {
     assert.equal(doc.settled, true);
     assert.ok(doc.settled_date);
     assert.ok(messages.some(m => m.body.includes('paga')));
-    assert.equal(ctx.sessions[ctx.sessionKey].state, SessionState.IDLE);
+    assert.equal(ctx.sessions.get(ctx.sessionKey).state, SessionState.IDLE);
   });
 
   it('AWAITING_DEBTOR_NAME with valid name transitions to confirmation', async () => {
@@ -109,12 +109,12 @@ describe('Debt Integration Tests', () => {
       state: SessionState.AWAITING_DEBTOR_NAME,
       pendingDebt: { type: 'recebido', creditor: 'user', debtor: 'user', amount: 3000, description: 'test' }
     };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
 
     await handleAwaitingDebtorName(ctx);
 
-    assert.equal(ctx.sessions[ctx.sessionKey].state, SessionState.AWAITING_DEBT_CONFIRMATION);
-    assert.equal(ctx.sessions[ctx.sessionKey].pendingDebt.debtor, 'Maria');
+    assert.equal(ctx.sessions.get(ctx.sessionKey).state, SessionState.AWAITING_DEBT_CONFIRMATION);
+    assert.equal(ctx.sessions.get(ctx.sessionKey).pendingDebt.debtor, 'Maria');
     assert.ok(messages.some(m => m.body.includes('Sim ou Não')));
   });
 
@@ -125,11 +125,11 @@ describe('Debt Integration Tests', () => {
       state: SessionState.AWAITING_DEBTOR_NAME,
       pendingDebt: { type: 'recebido', creditor: 'user', debtor: 'user', amount: 3000, description: 'test' }
     };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
 
     await handleAwaitingDebtorName(ctx);
 
-    assert.equal(ctx.sessions[ctx.sessionKey].state, SessionState.IDLE);
+    assert.equal(ctx.sessions.get(ctx.sessionKey).state, SessionState.IDLE);
     assert.ok(messages.some(m => m.body.includes('inválido') || m.body.includes('Nome')));
   });
 
@@ -154,6 +154,6 @@ describe('Debt Integration Tests', () => {
     await handlePago(ctx, 'João');
 
     assert.ok(messages.some(m => m.body.includes('mais 1 dívida')));
-    assert.equal(ctx.sessions[ctx.sessionKey].state, SessionState.AWAITING_PAGO_CONFIRM);
+    assert.equal(ctx.sessions.get(ctx.sessionKey).state, SessionState.AWAITING_PAGO_CONFIRM);
   });
 });

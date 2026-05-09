@@ -14,7 +14,7 @@ export function createTestContext(overrides = {}) {
     messageSid: 'SM_test_' + Math.random().toString(36).substring(2, 8),
     sessionKey: hashPhone(TEST_PHONE),
     session: { state: SessionState.IDLE },
-    sessions: {},
+    sessions: new Map(),
     db: overrides.db || null,
     transactions: overrides.transactions || null,
     debts: overrides.debts || null,

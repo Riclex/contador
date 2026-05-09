@@ -1,6 +1,6 @@
 # Política de Privacidade - Contador
 
-**Última atualização:** 15 de Abril de 2026
+**Última atualização:** 9 de Maio de 2026
 
 ## 1. Introdução
 

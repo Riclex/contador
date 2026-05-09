@@ -67,7 +67,7 @@ describe('Commands Integration Tests', () => {
     const { ctx, messages } = createTestContext({ transactions, debts, events, rateLimits, db, mongoClient });
     ctx.text = 'sim';
     ctx.session = { state: SessionState.AWAITING_APAGAR_CONFIRM };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
 
     await handleAwaitingApagarConfirm(ctx);
 
@@ -92,7 +92,7 @@ describe('Commands Integration Tests', () => {
     const { ctx, messages } = createTestContext({ transactions, debts, events, rateLimits, db });
     ctx.text = 'nao';
     ctx.session = { state: SessionState.AWAITING_APAGAR_CONFIRM };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
 
     await handleAwaitingApagarConfirm(ctx);
 
@@ -115,7 +115,7 @@ describe('Commands Integration Tests', () => {
       state: SessionState.AWAITING_DESFAZER_CONFIRM,
       pendingDesfazer: { type: 'transaction', id: inserted.insertedId, detail: 'entrada de 5 000,00 Kz' }
     };
-    ctx.sessions[ctx.sessionKey] = ctx.session;
+    ctx.sessions.set(ctx.sessionKey, ctx.session);
 
     await handleAwaitingDesfazerConfirm(ctx);
 

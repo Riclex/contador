@@ -32,6 +32,11 @@ jobs:
           node --check lib/security.js
           node --check lib/parsers.js
           node --check lib/cache.js
+          node --check lib/openai.js
+          node --check lib/session.js
+
+      - name: Lint
+        run: npm run lint
 
       - name: Run unit tests
         run: npm test

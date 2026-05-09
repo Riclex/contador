@@ -8,7 +8,8 @@
     "test": "node --test test/*.test.js",
     "test:integration": "node --test test/integration/*.test.js",
     "test:all": "node --test test/*.test.js test/integration/*.test.js",
-    "test:coverage": "node --test --experimental-test-coverage test/*.test.js test/integration/*.test.js"
+    "test:coverage": "node --test --experimental-test-coverage test/*.test.js test/integration/*.test.js",
+    "lint": "eslint ."
   },
   "dependencies": {
     "body-parser": "^1.20.2",
@@ -21,6 +22,9 @@
     "twilio": "^4.21.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.3.0",
+    "globals": "^17.6.0",
     "mongodb-memory-server": "^11.0.1"
   }
 }

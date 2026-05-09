@@ -1,6 +1,6 @@
 # Termos de Uso - Contador
 
-**Última atualização:** 20 de Abril de 2026
+**Última atualização:** 9 de Maio de 2026
 
 ## 1. Descrição do Serviço
 

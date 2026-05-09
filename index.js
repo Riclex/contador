@@ -2,19 +2,19 @@ import "dotenv/config";
 import express from "express";
 import bodyParser from "body-parser";
 import { MongoClient } from "mongodb";
-import crypto from "crypto";
-import OpenAI from "openai";
 import twilio from "twilio";
-import { fileURLToPath, pathToFileURL } from "url";
-import { dirname } from "path";
+import { pathToFileURL } from "url";
 import helmet from "helmet";
 import rateLimit from 'express-rate-limit';
-import { normalize, parseTransactionRegex, parseDebtRegex, INCOME_VERBS, EXPENSE_VERBS, DEBT_VERBS_RECEBIDO, DEBT_VERBS_DEVIDO } from './lib/parsers.js';
-import { hashPhone, sanitizeInput, isValidWhatsAppPhone, sanitizeForPrompt, MAX_OPENAI_INPUT_LENGTH, getAngolaMidnightUTC, ANGOLA_OFFSET_MS, MAX_AMOUNT, isAffirmative, isNegative, isConfirmationWord, formatKz, SessionState, OnboardingState, isValidDebtName, validateTransactionResponse, validateDebtResponse } from './lib/security.js';
-import { getCacheKey, getCachedResponse, setCachedResponse, getCacheStats } from './lib/cache.js';
-import { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleDebtParse, handleTransactionParse, handleMetricas } from './lib/commands.js';
-import { computeDailyMetrics, getOrCreateSnapshot, getRecentSnapshots, formatDelta } from './lib/metrics.js';
-import { trackOpenAICall, getOpenAIStats, isOpenAICapReached } from './lib/cache.js';
+import { normalize } from './lib/parsers.js';
+import { hashPhone, sanitizeInput, isValidWhatsAppPhone, getAngolaMidnightUTC, ANGOLA_OFFSET_MS, isAffirmative, isConfirmationWord, SessionState, OnboardingState } from './lib/security.js';
+import { getCacheStats } from './lib/cache.js';
+import { COMMANDS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleMetricas } from './lib/handlers/commands.js';
+import { handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm } from './lib/handlers/session.js';
+import { handleDebtParse, handleTransactionParse } from './lib/handlers/parsers.js';
+import { computeDailyMetrics, getOrCreateSnapshot, getRecentSnapshots } from './lib/metrics.js';
+import { parseDebt, parseTransaction, isOpenaiHealthy, startOpenaiHealthCheck } from './lib/openai.js';
+import { getSession, setSession, SESSION_TTL_MS, sessions } from './lib/session.js';
 
 // --- Angola timezone helper (imported from lib/security.js)
 
@@ -30,16 +30,13 @@ let transactions = null;
 let debts = null;
 let events = null;
 
-const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes (used by both app logic and MongoDB TTL index)
 const processingUsers = new Set(); // Per-user lock to prevent concurrent webhook processing
 
-// --- OpenAI health tracking (declared before /health endpoint to avoid TDZ)
-let openaiHealthy = true;
-let openaiConsecutiveFailures = 0;
-const OPENAI_FAILURE_THRESHOLD = 3; // Mark unhealthy after 3 consecutive failures
+// SESSION_TTL_MS imported from lib/session.js
+// openaiHealthy managed by lib/openai.js (use isOpenaiHealthy() to read)
 
 // --- Stats Cache (5 minute TTL)
-const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
+const STATS_CACHE_TTL_MS = 60 * 1000; // 1 minute — balances freshness vs. repeated aggregation
 let statsCache = {
   data: null,
   timestamp: 0
@@ -218,12 +215,12 @@ const processedMessages = new Set();
 let mongoConnected = false;
 let serverReady = false;
 let transactionsSupported = false;
+let serverInstance = null; // Exposed for tests via getServerPort()
 
 // --- Response Cache (imported from lib/cache.js)
 
-// --- Main module guard — server only starts when index.js is run directly, not when imported by tests
-const __filename = fileURLToPath(import.meta.url);
-const isMainModule = pathToFileURL(process.argv[1] || '').href === import.meta.url;
+// --- Main module guard — server only starts when index.js is run directly, or in test mode
+const isMainModule = pathToFileURL(process.argv[1] || '').href === import.meta.url || process.env.NODE_ENV === 'test';
 
 const app = express();
 app.use(helmet()); // Security headers (CSP, X-Frame-Options, etc.)
@@ -248,12 +245,12 @@ const healthLimiter = rateLimit({
 });
 app.get("/health", healthLimiter, (_, res) => {
   if (!serverReady) {
-    return res.status(503).json({ status: "starting", mongodb: "disconnected", openai: openaiHealthy ? "unknown" : "degraded" });
+    return res.status(503).json({ status: "starting", mongodb: "disconnected", openai: isOpenaiHealthy() ? "unknown" : "degraded" });
   }
   if (!mongoConnected) {
-    return res.status(503).json({ status: "unhealthy", mongodb: "disconnected", openai: openaiHealthy ? "unknown" : "degraded" });
+    return res.status(503).json({ status: "unhealthy", mongodb: "disconnected", openai: isOpenaiHealthy() ? "unknown" : "degraded" });
   }
-  res.json({ status: "ok", mongodb: "connected", openai: openaiHealthy ? "connected" : "degraded" });
+  res.json({ status: "ok", mongodb: "connected", openai: isOpenaiHealthy() ? "connected" : "degraded" });
 });
 
 if (isMainModule) {
@@ -291,10 +288,6 @@ if (!process.env.WEBHOOK_URL) {
 const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS
   ? process.env.ADMIN_NUMBERS.split(',').map(s => s.trim())
   : [];
-
-function isAdmin(phone) {
-  return ADMIN_NUMBERS.includes(phone);
-}
 
 // --- Clients and startup state
 const mongo = new MongoClient(process.env.MONGODB_URI);
@@ -336,281 +329,17 @@ async function connectWithRetry() {
   }
 }
 
-// --- OpenAI / Twilio clients (initialized before routes; used by helpers below)
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// --- Twilio client (initialized before routes; used by helpers below)
+// OpenAI client managed by lib/openai.js (lazy initialization)
 
 const twilioClient = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
 
-const OPENAI_TIMEOUT_MS = 15000; // 15 second timeout
-
-// --- OpenAI System Prompts ---
-const DEBT_SYSTEM_PROMPT = "You are a strict debt tracking message parser. \
-Your task is to extract a single debt transaction from a Portuguese sentence. \
-You MUST output a JSON object with exactly these keys:\
-type: 'recebido' or 'devido'\
-creditor: string (who is owed money)\
-debtor: string (who owes money)\
-amount: number (integer, no currency symbols)\
-description: short string from the sentence.\
-Rules (MANDATORY): \
-1. Type mapping: \
-- 'recebido' = someone owes the user (e.g., 'João me deve', 'O João deve')\
-- 'devido' = user owes someone (e.g., 'eu devo', 'devo')\
-2. Amount: \
-- Extract numeric amount, ignore currency (Kz, kz, KZ, paus)\
-3. Description: \
-- Use relevant words from the sentence\
-4. Ambiguity: \
-- ONLY output {'error':'ambiguous'} if no debt relationship can be determined. \
-- DO NOT parse 'transferi' or 'enviei' as debts - they are transactions.\
-- DO NOT parse 'paguei' or 'pago' as debts - they are expenses.\
-5. Output: \
-- Output ONLY valid JSON. \
-- No explanations. \
-- No extra keys. \
-Examples: \
-Input: 'O João me deve 2000kz'\
-Output: {'type':'recebido','creditor':'user','debtor':'João','amount':2000,'description':'O João me deve'}\
-Input: 'Eu devo 1500 a Maria'\
-Output: {'type':'devido','creditor':'Maria','debtor':'user','amount':1500,'description':'Eu devo 1500'}\
-Input: 'Maria deve-me 3000'\
-Output: {'type':'recebido','creditor':'user','debtor':'Maria','amount':3000,'description':'Maria deve-me'}\
-Input: 'Emprestei 500 ao João'\
-Output: {'type':'recebido','creditor':'user','debtor':'João','amount':500,'description':'Emprestei 500'}\
-Input: 'Devo 200 a Ana'\
-Output: {'type':'devido','creditor':'Ana','debtor':'user','amount':200,'description':'Devo 200'}\
-Input: 'Transferi 200000 para Hugo'\
-Output: {'error':'ambiguous'}\
-Input: 'Enviei 1000 para a minha conta'\
-Output: {'error':'ambiguous'}\
-";
-
-const TRANSACTION_SYSTEM_PROMPT = "You are a strict financial message parser. \
-Your task is to extract a single financial transaction from a Portuguese sentence. \
-You MUST output a JSON object with exactly these keys:\
-type: 'income' or 'expense'\
-amount: number (integer, no currency symbols)\
-description: short string taken from the sentence.\
-Rules (MANDATORY): \
-1. Verb mapping: \
-- Any sentence containing verbs like 'gastei', 'paguei', 'comprei', 'gasto', 'pagamento' → type = 'expense'.\
-- Any sentence containing verbs like 'recebi', 'vendi', 'ganhei', 'paiei', 'biolo', 'fezada'→ type = 'income' \
-2. Amount: \
-- If a numeric amount is present, extract it. \
-- Ignore currency case (Kz, kz, KZ, AKZ, akz, paus are the same)\
-3. Description: \
-- Use the words after 'de', 'do', 'da' when present.\
-- If description is generic (e.g. 'saldo'), it is STILL VALID.\
-4. Ambiguity: \
-- ONLY output {'error':'ambiguous'} if: \
-- No numeric amount exists \
-- OR no verb exists \
-- OR transaction type cannot be determined. \
-5. Output: \
-- Output ONLY valid JSON. \
-- No explanations. \
-- No extra keys. \
-Examples: \
-Input: 'Gastei 1500 Kz de saldo'\
-Output: {'type':'expense','amount':1500,'description':'saldo'}\
-Input: 'Comprei 1000 kz de fuba'\
-Output: {'type':'expense','amount':1000,'description':'fuba'}\
-Input: 'Recebi 2000 Kz do João'\
-Output: {'type':'income','amount':2000,'description':'do João'}\
-Input: 'Comprei pão'\
-Output: {'error':'ambiguous'}\
-Input: 'Pus saldo'\
-Output: {'error':'ambiguous'}\
-Input: 'Emprestei 500 kz'\
-Output: {'error':'ambiguous'}\
-Input: 'Fezade de 3000 kz'\
-Output: {'type':'income','amount':3000,'description':'fezada'}\
-Input: 'Biolo 2500 kz'\
-Output: {'type':'income','amount':2500,'description':'biolo'}\
-Input: 'Paiei 3000 paus num wi'\
-Output: {'type':'income','amount':3000,'description':'wi'}\
-Input: 'Gastei 7000kz em compras'\
-Output: {'type':'expense','amount':7000,'description':'compras'}\
-Input: 'Recebi 1000 kz em dinheiro'\
-Output: {'type':'income','amount':1000,'description':'dinheiro'}\
-Input: 'Paguei 500 em saldo'\
-Output: {'type':'expense','amount':500,'description':'saldo'}\
-";
-
-// --- Shared OpenAI caller (deduplicates timeout/error-handling boilerplate) ---
-async function callOpenAI(systemPrompt, userPrompt, { temperature = 0 } = {}) {
-  // Safety valve: check daily OpenAI cost cap
-  if (isOpenAICapReached()) {
-    console.warn('[OPENAI] Daily cost cap reached. Falling back to regex-only.');
-    return { error: 'ambiguous' };
-  }
-  let timeoutId;
-  const openaiPromise = openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
-    ]
-  });
-  try {
-    const response = await Promise.race([
-      openaiPromise,
-      new Promise((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error('OpenAI timeout')), OPENAI_TIMEOUT_MS);
-      })
-    ]);
-    clearTimeout(timeoutId);
-    openaiConsecutiveFailures = 0;
-    openaiHealthy = true;
-    return JSON.parse(response.choices[0].message.content);
-  } catch (error) {
-    clearTimeout(timeoutId);
-    openaiPromise.catch(() => {}); // Neutralize losing promise rejection
-    openaiConsecutiveFailures++;
-    if (openaiConsecutiveFailures >= OPENAI_FAILURE_THRESHOLD) {
-      openaiHealthy = false;
-    }
-    console.error('OpenAI API error:', error.message);
-    if (error.message === 'OpenAI timeout') return { error: 'service_unavailable' };
-    if (error instanceof SyntaxError) return { error: 'ambiguous' };
-    return { error: 'service_unavailable' };
-  }
-}
-
-
-async function parseDebtOpenAI(text) {
-  const result = await callOpenAI(
-    DEBT_SYSTEM_PROMPT,
-    `Extrai uma dívida desta frase:\n"${sanitizeForPrompt(text)}"`,
-    { temperature: 0 }
-  );
-  if (result.error) return result;
-  const validated = validateDebtResponse(result);
-  if (validated.error) {
-    console.error('[OpenAI] Malformed debt response:', JSON.stringify(result));
-    return validated;
-  }
-  return validated;
-}
-
-async function parseDebt(text) {
-  // Check cache first
-  const cached = getCachedResponse(text, 'debt');
-  if (cached) {
-    console.log('Cache hit for debt');
-    return { ...cached, source: 'cache' };
-  }
-
-  // Try regex first (fast, free)
-  const regexResult = parseDebtRegex(text);
-  if (regexResult.error !== 'ambiguous') {
-    setCachedResponse(text, 'debt', regexResult);
-    return { ...regexResult, source: 'regex' };
-  }
-
-  // Fallback to OpenAI for ambiguous cases
-  console.log('Cache miss - calling OpenAI for debt');
-  trackOpenAICall(false);
-  const result = await parseDebtOpenAI(text);
-  if (!result.error) {
-    setCachedResponse(text, 'debt', result);
-  }
-  return { ...result, source: 'openai' };
-}
-
-// --- Session Management (MongoDB-based persistence)
-// State types: IDLE, AWAITING_CONFIRMATION, AWAITING_DEBT_CONFIRMATION, AWAITING_DEBTOR_NAME, AWAITING_PAGO_CONFIRM, AWAITING_APAGAR_CONFIRM
-
-async function getSession(phone) {
-  if (!mongoConnected) return null;
-
-  const phoneHash = hashPhone(phone);
-  const doc = await db.collection('sessions').findOne({ phone_hash: phoneHash });
-  if (!doc) return null;
-
-  // Check if session has expired (based on last state change, not last read)
-  if (Date.now() - doc.updatedAt > SESSION_TTL_MS) {
-    await db.collection('sessions').deleteOne({ phone_hash: phoneHash });
-    return null;
-  }
-
-  // Initialize version for optimistic locking if missing
-  if (typeof doc.version !== 'number') {
-    doc.version = 0;
-  }
-
-  return doc;
-}
-
-async function setSession(phone, sessionData) {
-  const phoneHash = hashPhone(phone);
-  if (!mongoConnected) {
-    // Fallback to in-memory if MongoDB is not connected
-    sessions[phoneHash] = { ...sessionData, updatedAt: Date.now() };
-    return { modifiedCount: 1 };
-  }
-
-  const currentVersion = typeof sessionData.version === 'number' ? sessionData.version : 0;
-  const result = await db.collection('sessions').updateOne(
-    { phone_hash: phoneHash, version: currentVersion },
-    { $set: { ...sessionData, phone_hash: phoneHash, updatedAt: new Date() }, $inc: { version: 1 } },
-    { upsert: true }
-  );
-  return result;
-}
-
-async function deleteSession(phone) {
-  const phoneHash = hashPhone(phone);
-  if (!mongoConnected) {
-    delete sessions[phoneHash];
-    return;
-  }
-
-  await db.collection('sessions').deleteOne({ phone_hash: phoneHash });
-}
-
-// Keep in-memory fallback for speed
-const sessions = {};
-
-// --- Helpers
-
-async function parseTransaction(text) {
-  // Check cache first
-  const cached = getCachedResponse(text, 'transaction');
-  if (cached) {
-    console.log('Cache hit for transaction');
-    return { ...cached, source: 'cache' };
-  }
-
-  // Try regex first (fast, free)
-  const regexResult = parseTransactionRegex(text);
-  if (regexResult.error !== 'ambiguous') {
-    setCachedResponse(text, 'transaction', regexResult);
-    return { ...regexResult, source: 'regex' };
-  }
-
-  // Fallback to OpenAI for ambiguous cases
-  console.log('Cache miss - calling OpenAI for transaction');
-  trackOpenAICall(false);
-  const result = await callOpenAI(
-    TRANSACTION_SYSTEM_PROMPT,
-    `Extrai uma transação financeira desta frase:\n"${sanitizeForPrompt(text)}"`,
-    { temperature: 0 }
-  );
-  if (result.error) return { ...result, source: 'openai' };
-  const validated = validateTransactionResponse(result);
-  if (validated.error) {
-    console.error('[OpenAI] Malformed transaction response:', JSON.stringify(result));
-    return { ...validated, source: 'openai' };
-  }
-  setCachedResponse(text, 'transaction', validated);
-  return { ...validated, source: 'openai' };
-}
+// OpenAI and session management imported from lib/
+//   - parseDebt, parseTransaction, isOpenaiHealthy from lib/openai.js
+//   - getSession, setSession, deleteSession, SESSION_TTL_MS, sessions from lib/session.js
 
 const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER || "whatsapp:+14155238886";
 
@@ -748,53 +477,54 @@ app.post("/webhook", asyncHandler(async (req, res) => {
   }, WEBHOOK_TIMEOUT_MS);
   res.on('finish', () => clearTimeout(webhookTimeout));
 
-  // Webhook Signature Verification (Sprint 9 - Security)
-  // Generate request ID for tracking logs
+  // Webhook Signature Verification (Sprint 9 — Security)
+  // Skipped in test mode (NODE_ENV=test) to allow integration testing without Twilio credentials
   const reqId = Math.random().toString(36).substring(2, 8);
   req.reqId = reqId;
-  // Signature verification logged below - no raw body logging (privacy)
 
-  const twilioSignature = req.headers['x-twilio-signature'];
-  if (!twilioSignature) {
-    console.error(`[WEBHOOK:${reqId}] Missing signature header from:`, req.ip);
-    return res.status(401).send('Missing signature');
+  if (process.env.NODE_ENV !== 'test') {
+    const twilioSignature = req.headers['x-twilio-signature'];
+    if (!twilioSignature) {
+      console.error(`[WEBHOOK:${reqId}] Missing signature header from:`, req.ip);
+      return res.status(401).send('Missing signature');
+    }
+
+    // WEBHOOK_URL preferred for reliable signature verification; falls back to header-based URL
+    const url = process.env.WEBHOOK_URL || `${req.protocol}://${req.get('host')}/webhook`;
+
+    // Use Twilio's official validateRequest function
+    const isValid = twilio.validateRequest(
+      process.env.TWILIO_AUTH_TOKEN,
+      twilioSignature,
+      url,
+      req.body  // Parsed body object
+    );
+
+    if (!isValid) {
+      console.error(`[WEBHOOK:${reqId}] Invalid webhook signature from:`, req.ip);
+      console.error(`[WEBHOOK:${reqId}] URL:`, url);
+      return res.status(401).send('Invalid signature');
+    }
+
+    console.log(`[WEBHOOK:${reqId}] Signature verified successfully`);
   }
-
-  // WEBHOOK_URL preferred for reliable signature verification; falls back to header-based URL
-  const url = process.env.WEBHOOK_URL || `${req.protocol}://${req.get('host')}/webhook`;
-
-  // Use Twilio's official validateRequest function
-  const isValid = twilio.validateRequest(
-    process.env.TWILIO_AUTH_TOKEN,
-    twilioSignature,
-    url,
-    req.body  // Parsed body object
-  );
-
-  if (!isValid) {
-    console.error(`[WEBHOOK:${reqId}] Invalid webhook signature from:`, req.ip);
-    console.error(`[WEBHOOK:${reqId}] URL:`, url);
-    return res.status(401).send('Invalid signature');
-  }
-
-  console.log(`[WEBHOOK:${reqId}] Signature verified successfully`);
 
   const from = req.body.From;
   const rawText = req.body.Body || "";
 
-  // Reject excessively long messages (WhatsApp max is ~65K chars — no legitimate use case exceeds 2000)
-  const MAX_MESSAGE_LENGTH = 2000;
-  if (rawText.length > MAX_MESSAGE_LENGTH) {
-    console.warn(`[WEBHOOK:${reqId}] Message too long: ${rawText.length} chars from ${hashPhone(from)}`);
-    return res.sendStatus(413);
+  // Validate phone number format early (prevent NoSQL injection and hashPhone(undefined) crash)
+  if (!from || !isValidWhatsAppPhone(from)) {
+    console.error(`[WEBHOOK:${reqId}] Invalid phone number format:`, from);
+    return res.status(400).send('Invalid phone number');
   }
 
   const userHash = hashPhone(from);
 
-  // Validate phone number format (prevent NoSQL injection)
-  if (!isValidWhatsAppPhone(from)) {
-    console.error(`[WEBHOOK:${reqId}] Invalid phone number format:`, hashPhone(from));
-    return res.status(400).send('Invalid phone number');
+  // Reject excessively long messages (WhatsApp max is ~65K chars — no legitimate use case exceeds 2000)
+  const MAX_MESSAGE_LENGTH = 2000;
+  if (rawText.length > MAX_MESSAGE_LENGTH) {
+    console.warn(`[WEBHOOK:${reqId}] Message too long: ${rawText.length} chars from ${userHash}`);
+    return res.sendStatus(413);
   }
 
   // Input sanitization
@@ -804,6 +534,7 @@ app.post("/webhook", asyncHandler(async (req, res) => {
   // Prevent concurrent processing of the same user (race condition on session state)
   if (processingUsers.has(userHash)) return res.sendStatus(204);
   processingUsers.add(userHash);
+  const userLockTimer = setTimeout(() => processingUsers.delete(userHash), 30000);
 
   try {
   // Rate limiting — check before logging events to avoid inflating stats
@@ -818,7 +549,7 @@ app.post("/webhook", asyncHandler(async (req, res) => {
   // Parallelize: check onboarding state and load session simultaneously
   const [onboardingState, mongoSession] = await Promise.all([
     getOnboardingState(from),
-    getSession(from)
+    getSession(db, mongoConnected, from)
   ]);
 
   // Handle consent flow (short-circuits for non-consenting users)
@@ -868,7 +599,7 @@ Experimenta mandar algo como:
 
   // Load session (already fetched in parallel above)
   const sessionKey = hashPhone(from); // Use hash as key — raw phone numbers never stored in memory
-  let session = sessions[sessionKey];
+  let session = sessions.get(sessionKey);
   let sessionDirty = false; // Track whether session state changed (reduces MongoDB writes)
 
   function markSessionDirty() {
@@ -878,14 +609,14 @@ Experimenta mandar algo como:
   async function saveSessionIfDirty() {
     if (sessionDirty) {
       try {
-        const result = await setSession(from, sessions[sessionKey]);
+        const result = await setSession(db, mongoConnected, from, sessions.get(sessionKey));
         if (result.modifiedCount === 0 && result.upsertedCount === 0) {
           // Version conflict — reload from MongoDB and retry once
           console.warn('[SESSION] Version conflict detected, reloading session');
-          const fresh = await getSession(from);
-          sessions[sessionKey] = fresh || { state: SessionState.IDLE, updatedAt: new Date() };
+          const fresh = await getSession(db, mongoConnected, from);
+          sessions.set(sessionKey, fresh || { state: SessionState.IDLE, updatedAt: new Date() });
           // Retry save with fresh version
-          const retryResult = await setSession(from, sessions[sessionKey]);
+          const retryResult = await setSession(db, mongoConnected, from, sessions.get(sessionKey));
           if (retryResult.modifiedCount === 0 && retryResult.upsertedCount === 0) {
             console.error('[SESSION] Failed to save session after retry');
             return;
@@ -899,16 +630,16 @@ Experimenta mandar algo como:
     }
   }
   if (session && session.updatedAt && Date.now() - new Date(session.updatedAt).getTime() > SESSION_TTL_MS) {
-    delete sessions[sessionKey];
+    sessions.delete(sessionKey);
     session = null;
   }
   if (!session) {
     session = mongoSession || { state: SessionState.IDLE, updatedAt: new Date() };
-    sessions[sessionKey] = { ...session }; // Clone to avoid shared reference
+    sessions.set(sessionKey, { ...session }); // Clone to avoid shared reference
   } else {
     // Clone in-memory session to prevent concurrent handlers from sharing state
     session = { ...session };
-    sessions[sessionKey] = session;
+    sessions.set(sessionKey, session);
   }
 
   // Reset session if user typed a command during an active confirmation flow
@@ -916,9 +647,9 @@ Experimenta mandar algo como:
     const isCommand = COMMANDS.has(text) || /^\/\w+\s+/.test(text);
     if (isCommand) {
       await reply(from, "Operação cancelada.");
-      markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
+      markSessionDirty(); sessions.set(sessionKey, { state: SessionState.IDLE });
       await saveSessionIfDirty();
-      session = sessions[sessionKey];
+      session = sessions.get(sessionKey);
     }
   }
 
@@ -1089,11 +820,11 @@ Experimenta mandar algo como:
     return res.sendStatus(204);
 
   case SessionState.IDLE:
-  default:
+  default: {
     // Safety: catch unexpected state values and reset to IDLE
     if (session.state !== SessionState.IDLE) {
       console.warn(`[SESSION] Unexpected state ${session.state}, resetting to IDLE`);
-      markSessionDirty(); sessions[sessionKey] = { state: SessionState.IDLE };
+      markSessionDirty(); sessions.set(sessionKey, { state: SessionState.IDLE });
       await saveSessionIfDirty();
     }
     // Try debt parsing first, then transaction parsing
@@ -1103,14 +834,16 @@ Experimenta mandar algo como:
     }
     return res.sendStatus(204);
   }
+  }
   } finally {
+    clearTimeout(userLockTimer);
     processingUsers.delete(userHash);
   }
 
 }));
 
 // Global error handler - catches unhandled errors from async route handlers
-app.use((err, req, res, next) => {
+app.use((err, req, res, _next) => {
   console.error(`[ERROR] Unhandled error on ${req.method} ${req.path}:`, err.message);
   console.error(err.stack);
   if (!res.headersSent) {
@@ -1119,8 +852,9 @@ app.use((err, req, res, next) => {
 });
 
 // --- Bind HTTP port BEFORE MongoDB (Railway kills containers that don't bind quickly)
-const server = app.listen(process.env.PORT || 3000);
-console.log(`HTTP server listening on port ${process.env.PORT || 3000}`);
+serverInstance = app.listen(process.env.PORT || 3000, () => {
+  console.log(`HTTP server listening on port ${serverInstance.address().port}`);
+});
 
 // --- MongoDB connection (after port is bound — slow connects won't kill the container)
 await connectWithRetry();
@@ -1142,9 +876,7 @@ mongo.on('close', () => {
     reconnectInProgress = true;
     connectWithRetry().then(() => {
       // Clear potentially stale in-memory session cache after reconnect
-      for (const key of Object.keys(sessions)) {
-        delete sessions[key];
-      }
+      sessions.clear();
     }).finally(() => { reconnectInProgress = false; });
   }
 });
@@ -1173,6 +905,14 @@ try {
     { expireAfterSeconds: 7 * 24 * 60 * 60, partialFilterExpression: { event_name: 'data_deletion_started' } }
   );
 } catch (err) { if (err.code !== 86) throw err; }
+
+// Auto-delete non-critical events after 1 year (PII-adjacent data retention)
+try {
+  await events.createIndex(
+    { timestamp: 1 },
+    { expireAfterSeconds: 365 * 24 * 60 * 60, partialFilterExpression: { event_name: { $nin: ['data_deleted', 'data_deletion_started'] } } }
+  );
+} catch (err) { if (err.code !== 86 && err.code !== 67) throw err; }
 
 // Create indexes on debts collection (user_hash replaces user_phone for privacy)
 try { await debts.createIndex({ user_hash: 1, settled: 1 }); } catch (err) { if (err.code !== 86) throw err; }
@@ -1354,22 +1094,8 @@ try {
 serverReady = true;
 console.log('Server ready — all startup complete');
 
-// Proactive OpenAI health check (only in server mode, not during tests)
-const OPENAI_HEALTH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const OPENAI_HEALTH_TIMEOUT_MS = 5000; // 5 second timeout
-const openaiHealthTimer = setInterval(async () => {
-  try {
-    await Promise.race([
-      openai.models.list().next(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), OPENAI_HEALTH_TIMEOUT_MS))
-    ]);
-    openaiHealthy = true;
-  } catch (err) {
-    openaiHealthy = false;
-    console.warn('[OPENAI-HEALTH] Check failed:', err.message);
-  }
-}, OPENAI_HEALTH_INTERVAL_MS);
-openaiHealthTimer.unref(); // Don't prevent process exit
+// Proactive OpenAI health check (managed by lib/openai.js)
+startOpenaiHealthCheck();
 
 // --- Graceful shutdown
 let serverClosing = false;
@@ -1380,7 +1106,7 @@ async function gracefulShutdown(forceExitDelayMs = 10000) {
   console.log('Shutting down gracefully...');
 
   // Stop accepting new connections, wait for in-flight requests to drain
-  server.close(async () => {
+  serverInstance.close(async () => {
     try {
       await mongo.close();
       console.log('MongoDB connection closed');
@@ -1419,6 +1145,18 @@ process.on('uncaughtException', (error) => {
 
 // --- Export pure functions for testing (no server side effects when imported)
 // Note: checkRateLimit is async and requires MongoDB — not exported for unit testing
+export function getServerPort() {
+  return serverInstance ? serverInstance.address().port : null;
+}
+
+// Test helpers: reset in-memory state between test runs
+export function clearInMemorySessions() {
+  sessions.clear();
+}
+export function clearProcessedMessages() {
+  processedMessages.clear();
+}
+
 // Re-exports from lib/ modules
 export {
   normalize,
@@ -1456,4 +1194,6 @@ export {
   getCacheStats
 } from './lib/cache.js';
 
-export { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleDebtParse, handleTransactionParse } from './lib/commands.js';
+export { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar } from './lib/handlers/commands.js';
+export { handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm } from './lib/handlers/session.js';
+export { handleDebtParse, handleTransactionParse } from './lib/handlers/parsers.js';

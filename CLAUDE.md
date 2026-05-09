@@ -11,7 +11,9 @@ This is a WhatsApp-based finance tracking MVP that allows users to record income
 Modular Express.js application with handlers extracted into `lib/` modules:
 
 - **Entry point**: `index.js` — Express server, webhook handler, MongoDB connection, session management
-- **Command handlers**: `lib/commands.js` — 22 handler functions receiving a `ctx` context object
+- **Command handlers**: `lib/handlers/commands.js` — user + admin command handler functions (21 handlers) receiving a `ctx` context object
+- **Session state handlers**: `lib/handlers/session.js` — session state machine handlers (6 handlers)
+- **Fall-through parsers**: `lib/handlers/parsers.js` — debt and transaction parsing with OpenAI fallback
 - **Security utilities**: `lib/security.js` — hashing, sanitization, validation, session states, schema validators
 - **Parsers**: `lib/parsers.js` — regex-based transaction and debt parsers
 - **Cache**: `lib/cache.js` — LRU response cache for parsed results
