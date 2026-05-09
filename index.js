@@ -16,6 +16,8 @@ import { computeDailyMetrics, getOrCreateSnapshot, getRecentSnapshots } from './
 import { parseDebt, parseTransaction, isOpenaiHealthy, startOpenaiHealthCheck } from './lib/openai.js';
 import { getSession, setSession, SESSION_TTL_MS, sessions } from './lib/session.js';
 import { createWebhookHandler } from './lib/webhook.js';
+import logger from './lib/logger.js';
+import { WebhookBodySchema } from './lib/schemas.js';
 
 // --- Angola timezone helper (imported from lib/security.js)
 
@@ -24,12 +26,12 @@ import { createWebhookHandler } from './lib/webhook.js';
 const MAX_MESSAGES_PER_USER_PER_DAY = 50;
 
 // --- MongoDB collections (declared before functions that reference them) ---
-let rateLimits = null;
-let dailyMetrics = null;
-let db = null;
-let transactions = null;
-let debts = null;
-let events = null;
+let rateLimits;
+let dailyMetrics;
+let db;
+let transactions;
+let debts;
+let events;
 
 const processingUsers = new Set(); // Per-user lock to prevent concurrent webhook processing
 
@@ -278,7 +280,7 @@ app.use(bodyParser.urlencoded({
 const requiredEnvVars = ["MONGODB_URI", "OPENAI_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"];
 const missing = requiredEnvVars.filter((key) => !process.env[key]);
 if (missing.length > 0) {
-  console.error(`Missing required environment variables: ${missing.join(", ")}`);
+  logger.error(`Missing required environment variables: ${missing.join(", ")}`);
   process.exit(1);
 }
 
@@ -286,14 +288,14 @@ if (missing.length > 0) {
 const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_SERVICE_DOMAIN || process.env.RAILWAY_STATIC_URL;
 if (!process.env.WEBHOOK_URL && railwayDomain) {
   process.env.WEBHOOK_URL = `https://${railwayDomain}/webhook`;
-  console.log(`[ENV] Auto-configured WEBHOOK_URL from Railway domain: ${process.env.WEBHOOK_URL}`);
+  logger.info(`[ENV] Auto-configured WEBHOOK_URL from Railway domain: ${process.env.WEBHOOK_URL}`);
 }
 
 // WEBHOOK_URL is strongly recommended for correct Twilio signature verification.
 // Without it, the app falls back to header-based URL reconstruction which may fail
 // behind reverse proxies. The app will still start — this is a warning, not fatal.
 if (!process.env.WEBHOOK_URL) {
-  console.warn('[WARN] WEBHOOK_URL not set — Twilio signature verification will use header-based URL reconstruction. Set WEBHOOK_URL for production deployments.');
+  logger.warn('[WARN] WEBHOOK_URL not set — Twilio signature verification will use header-based URL reconstruction. Set WEBHOOK_URL for production deployments.');
 }
 
 // Admin phone numbers for /stats command (required, no defaults)
@@ -317,18 +319,18 @@ async function connectWithRetry() {
       mongoConnected = true;
       deps.mongoConnected = true;
       mongoRetryCount = 0;
-      console.log("Connected to MongoDB");
+      logger.info("Connected to MongoDB");
       return;
     } catch (err) {
       mongoRetryCount++;
       const backoff = Math.min(1000 * Math.pow(2, mongoRetryCount - 1), 30000);
-      console.error(`MongoDB connection attempt ${mongoRetryCount}/${MAX_MONGO_RETRIES} failed: ${err.message}`);
-      console.log(`Retrying in ${backoff}ms...`);
+      logger.error(err, `MongoDB connection attempt ${mongoRetryCount}/${MAX_MONGO_RETRIES} failed`);
+      logger.info(`Retrying in ${backoff}ms...`);
       await new Promise(resolve => setTimeout(resolve, backoff));
     }
   }
   // After fast retries exhausted, switch to slow indefinite retry
-  console.error("Failed to connect to MongoDB after fast retries. Switching to slow retry (60s interval)...");
+  logger.error("Failed to connect to MongoDB after fast retries. Switching to slow retry (60s interval)...");
   while (true) {
     await new Promise(resolve => setTimeout(resolve, 60000));
     try {
@@ -336,10 +338,10 @@ async function connectWithRetry() {
       mongoConnected = true;
       deps.mongoConnected = true;
       mongoRetryCount = 0;
-      console.log("Connected to MongoDB (slow retry)");
+      logger.info("Connected to MongoDB (slow retry)");
       return;
     } catch (err) {
-      console.error(`MongoDB slow retry failed: ${err.message}`);
+      logger.error(err, 'MongoDB slow retry failed');
     }
   }
 }
@@ -366,7 +368,7 @@ async function reply(to, body) {
       body
     });
   } catch (err) {
-    console.error('Failed to send WhatsApp message:', err.message);
+    logger.error(err, 'Failed to send WhatsApp message');
   }
 }
 
@@ -382,10 +384,10 @@ async function replyWithRetry(to, body, retries = 2) {
       return;
     } catch (err) {
       if (attempt < retries) {
-        console.warn(`[REPLY] Retry ${attempt + 1} for ${hashPhone(to)}:`, err.message);
+        logger.warn(err, `[REPLY] Retry ${attempt + 1} for ${hashPhone(to)}`);
         await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
       } else {
-        console.error(`[REPLY] All ${retries + 1} attempts failed for ${hashPhone(to)}:`, err.message);
+        logger.error(err, `[REPLY] All ${retries + 1} attempts failed for ${hashPhone(to)}`);
       }
     }
   }
@@ -415,17 +417,11 @@ async function logEvent(eventName, userPhone, metadata = {}) {
     // Store in MongoDB
     await events.insertOne(eventDoc);
 
-    // Also log to console in JSON format for easy parsing
-    console.log(JSON.stringify({
-      type: 'event',
-      event: eventName,
-      user_hash: userHash,
-      timestamp: new Date().toISOString(),
-      metadata
-    }));
+    // Also log to structured logger
+    logger.info({ type: 'event', event: eventName, user_hash: userHash, timestamp: new Date().toISOString(), metadata }, 'event logged');
   } catch (err) {
     logEventFailures++;
-    console.error(`[AUDIT-TRAIL-GAP] Event "${eventName}" failed to log:`, err.message);
+    logger.error(err, `[AUDIT-TRAIL-GAP] Event "${eventName}" failed to log`);
   }
 }
 
@@ -484,8 +480,7 @@ async function getOnboardingState(userPhone) {
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 // Global error handler - catches unhandled errors from async route handlers
 app.use((err, req, res, _next) => {
-  console.error(`[ERROR] Unhandled error on ${req.method} ${req.path}:`, err.message);
-  console.error(err.stack);
+  logger.error(err, `[ERROR] Unhandled error on ${req.method} ${req.path}`);
   if (!res.headersSent) {
     res.status(500).send('Internal Server Error');
   }
@@ -493,7 +488,7 @@ app.use((err, req, res, _next) => {
 
 // --- Bind HTTP port BEFORE MongoDB (Railway kills containers that don't bind quickly)
 serverInstance = app.listen(process.env.PORT || 3000, () => {
-  console.log(`HTTP server listening on port ${serverInstance.address().port}`);
+  logger.info(`HTTP server listening on port ${serverInstance.address().port}`);
 });
 
 // --- MongoDB connection (after port is bound — slow connects won't kill the container)
@@ -511,7 +506,7 @@ let reconnectInProgress = false;
 mongo.on('close', () => {
   mongoConnected = false;
   deps.mongoConnected = false;
-  console.warn('MongoDB connection closed. Attempting reconnection...');
+  logger.warn('MongoDB connection closed. Attempting reconnection...');
   // Prevent concurrent reconnection attempts
   if (!reconnectInProgress) {
     reconnectInProgress = true;
@@ -588,9 +583,9 @@ try {
       count++;
     }
     if (count > 0) {
-      console.log(`[MIGRATE] Backfilled user_hash for ${count} ${collection.collectionName} records.`);
+      logger.info(`[MIGRATE] Backfilled user_hash for ${count} ${collection.collectionName} records.`);
     }
-    console.log(`[MIGRATE] ${collection.collectionName} migration complete.`);
+    logger.info(`[MIGRATE] ${collection.collectionName} migration complete.`);
   };
   await migrateCollection(transactions);
   await migrateCollection(debts);
@@ -604,7 +599,7 @@ try {
       { $unset: { user_phone: "" } }
     );
     if (result.modifiedCount > 0) {
-      console.log(`[MIGRATE] Removed user_phone from ${result.modifiedCount} ${collection.collectionName} records.`);
+      logger.info(`[MIGRATE] Removed user_phone from ${result.modifiedCount} ${collection.collectionName} records.`);
     }
   };
   await removeUserPhone(transactions);
@@ -630,7 +625,7 @@ try {
     );
   }
   if (broadcastMigrated > 0) {
-    console.log(`[MIGRATE] Migrated ${broadcastMigrated} phone numbers from onboarding to broadcast_list`);
+    logger.info(`[MIGRATE] Migrated ${broadcastMigrated} phone numbers from onboarding to broadcast_list`);
   }
 
   // Backfill creditor_lower/debtor_lower for existing debt records (index-friendly queries)
@@ -651,21 +646,21 @@ try {
     }
   }
   if (debtsCount > 0) {
-    console.log(`[MIGRATE] Backfilled creditor_lower/debtor_lower for ${debtsCount} debt records.`);
-    console.log('[MIGRATE] Debt normalized fields migration complete.');
+    logger.info(`[MIGRATE] Backfilled creditor_lower/debtor_lower for ${debtsCount} debt records.`);
+    logger.info('[MIGRATE] Debt normalized fields migration complete.');
   }
   await markMigrationDone('backfill_user_hash');
   } else {
-    console.log('[MIGRATE] Skipping backfill_user_hash — already done');
+    logger.info('[MIGRATE] Skipping backfill_user_hash — already done');
   }
 } catch (err) {
-  console.error('[MIGRATE] Migration error (non-fatal):', err.message);
+  logger.error(err, '[MIGRATE] Migration error (non-fatal)');
 }
 
 // Migration: Re-hash from 16-char to 32-char hashes
 try {
   if (!(await isMigrationDone('hash_16_to_32'))) {
-    console.log('[MIGRATE] Checking for 16-char user_hash values...');
+    logger.info('[MIGRATE] Checking for 16-char user_hash values...');
     const collections = [transactions, debts, db.collection('onboarding'), db.collection('sessions')];
     for (const collection of collections) {
       const field = collection.collectionName === 'sessions' ? 'phone_hash' : 'user_hash';
@@ -673,16 +668,16 @@ try {
         $expr: { $eq: [{ $strLenCP: `$${field}` }, 16] }
       }).limit(1).toArray();
       if (shortHashDocs.length > 0) {
-        console.log(`[MIGRATE] WARNING: Found 16-char ${field} values in ${collection.collectionName}. Users with old hashes will appear as new and need to re-onboard.`);
+        logger.warn(`[MIGRATE] Found 16-char ${field} values in ${collection.collectionName}. Users with old hashes will appear as new and need to re-onboard.`);
       }
     }
     await markMigrationDone('hash_16_to_32');
-    console.log('[MIGRATE] hash_16_to_32 migration check complete');
+    logger.info('[MIGRATE] hash_16_to_32 migration check complete');
   } else {
-    console.log('[MIGRATE] Skipping hash_16_to_32 — already done');
+    logger.info('[MIGRATE] Skipping hash_16_to_32 — already done');
   }
 } catch (err) {
-  console.error('[MIGRATE] hash_16_to_32 migration error (non-fatal):', err.message);
+  logger.error(err, '[MIGRATE] hash_16_to_32 migration error (non-fatal)');
 }
 
 // Create indexes on sessions collection (phone_hash replaces phone for privacy)
@@ -703,7 +698,7 @@ try {
 } catch (err) {
   // 86 = index spec conflict, 67 = immutable option (e.g., changed TTL on existing index)
   if (err.code !== 86 && err.code !== 67) throw err;
-  console.warn(`[DB] sessions TTL index already exists (code ${err.code}), skipping`);
+  logger.warn(`[DB] sessions TTL index already exists (code ${err.code}), skipping`);
 }
 
 // Pre-populate dedup set from recent records (catches Twilio retries after restart)
@@ -712,9 +707,9 @@ try {
   recentTxSids.forEach(doc => processedMessages.add(doc.message_sid));
   const recentDebtSids = await debts.find({}, { projection: { message_sid: 1 } }).sort({ date: -1 }).limit(MAX_PROCESSED_MESSAGES).toArray();
   recentDebtSids.forEach(doc => processedMessages.add(doc.message_sid));
-  console.log(`[DB] Pre-populated dedup set with ${processedMessages.size} recent MessageSids`);
+  logger.info(`[DB] Pre-populated dedup set with ${processedMessages.size} recent MessageSids`);
 } catch (err) {
-  console.error('[DB] Dedup set pre-population failed (non-fatal):', err.message);
+  logger.error(err, '[DB] Dedup set pre-population failed (non-fatal)');
 }
 
 // Detect MongoDB transaction support (requires replica set)
@@ -723,12 +718,12 @@ try {
   const serverInfo = await adminDb.command({ isMaster: 1 });
   transactionsSupported = !!(serverInfo.setName);
   if (transactionsSupported) {
-    console.log('[DB] MongoDB replica set detected — transactions enabled');
+    logger.info('[DB] MongoDB replica set detected — transactions enabled');
   } else {
-    console.warn('[DB] MongoDB standalone detected — transactions disabled, /apagar will use sequential deletion');
+    logger.warn('[DB] MongoDB standalone detected — transactions disabled, /apagar will use sequential deletion');
   }
 } catch (err) {
-  console.warn('[DB] Could not detect MongoDB transaction support:', err.message);
+  logger.warn(err, '[DB] Could not detect MongoDB transaction support');
 }
 
 // --- Populate deps and register webhook route (after all init is complete) ---
@@ -764,13 +759,23 @@ Object.assign(deps, {
 });
 deps.mongoConnected = mongoConnected; // Sync live mutable state
 
+function validateWebhookBody(req, res, next) {
+  const result = WebhookBodySchema.safeParse(req.body);
+  if (!result.success) {
+    const issues = result.error.issues.map(i => i.message).join(', ');
+    logger.error(`Webhook validation failed: ${issues}`);
+    return res.status(400).send('Invalid request');
+  }
+  next();
+}
+
 const webhookHandler = createWebhookHandler(deps);
-app.post("/webhook", asyncHandler(webhookHandler));
+app.post("/webhook", validateWebhookBody, asyncHandler(webhookHandler));
 
 // --- All startup complete — server is now ready to handle requests
 serverReady = true;
 deps.serverReady = true;
-console.log('Server ready — all startup complete');
+logger.info('Server ready — all startup complete');
 
 // Proactive OpenAI health check (managed by lib/openai.js)
 startOpenaiHealthCheck();
@@ -781,22 +786,22 @@ let serverClosing = false;
 async function gracefulShutdown(forceExitDelayMs = 10000) {
   if (serverClosing) return;
   serverClosing = true;
-  console.log('Shutting down gracefully...');
+  logger.info('Shutting down gracefully...');
 
   // Stop accepting new connections, wait for in-flight requests to drain
   serverInstance.close(async () => {
     try {
       await mongo.close();
-      console.log('MongoDB connection closed');
+      logger.info('MongoDB connection closed');
     } catch (err) {
-      console.error('Error closing MongoDB:', err.message);
+      logger.error(err, 'Error closing MongoDB');
     }
     process.exit(0);
   });
 
   // Force exit after timeout if in-flight requests don't drain
   setTimeout(() => {
-    console.error(`Forced shutdown after ${forceExitDelayMs}ms timeout`);
+    logger.error(`Forced shutdown after ${forceExitDelayMs}ms timeout`);
     process.exit(1);
   }, forceExitDelayMs);
 }
@@ -806,13 +811,13 @@ process.on('SIGINT', gracefulShutdown);
 
 // Prevent unhandled rejections and exceptions from crashing the process silently
 process.on('unhandledRejection', (reason) => {
-  console.error('[FATAL] Unhandled promise rejection:', reason);
+  logger.error(reason, '[FATAL] Unhandled promise rejection');
   // Unhandled rejections can leave the process in an inconsistent state.
   // Exit gracefully after a short delay to allow in-flight operations to complete.
   gracefulShutdown(5000);
 });
 process.on('uncaughtException', (error) => {
-  console.error('[FATAL] Uncaught exception:', error);
+  logger.error(error, '[FATAL] Uncaught exception');
   // Per Node.js docs: process state is undefined after uncaughtException.
   // Always exit gracefully to prevent data corruption and undefined behavior.
   // Railway/container runtime will restart the process.
