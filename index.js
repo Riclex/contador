@@ -48,7 +48,7 @@ const deps = {
 // openaiHealthy managed by lib/openai.js (use isOpenaiHealthy() to read)
 
 // --- Stats Cache (5 minute TTL)
-const STATS_CACHE_TTL_MS = 60 * 1000; // 1 minute — balances freshness vs. repeated aggregation
+const STATS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes — daily metrics don't change intra-minute
 let statsCache = {
   data: null,
   timestamp: 0
