@@ -241,6 +241,47 @@ describe('isConfirmationWord', () => {
   });
 });
 
+// --- isAffirmative - punctuation tolerance ---
+describe('isAffirmative - punctuation tolerance', () => {
+  it('accepts "sim." with period', () => {
+    assert.ok(isAffirmative('sim.'));
+  });
+
+  it('accepts "sim!" with exclamation', () => {
+    assert.ok(isAffirmative('sim!'));
+  });
+
+  it('accepts "s." with period', () => {
+    assert.ok(isAffirmative('s.'));
+  });
+
+  it('accepts "ya!" with exclamation', () => {
+    assert.ok(isAffirmative('ya!'));
+  });
+
+  it('accepts "Sim." capitalized with period', () => {
+    assert.ok(isAffirmative('Sim.'));
+  });
+});
+
+describe('isNegative - punctuation tolerance', () => {
+  it('accepts "nao." with period', () => {
+    assert.ok(isNegative('nao.'));
+  });
+
+  it('accepts "não!" with exclamation', () => {
+    assert.ok(isNegative('não!'));
+  });
+
+  it('accepts "n." with period', () => {
+    assert.ok(isNegative('n.'));
+  });
+
+  it('accepts "Nao." capitalized with period', () => {
+    assert.ok(isNegative('Nao.'));
+  });
+});
+
 // --- formatKz ---
 describe('formatKz', () => {
   it('formats 0 as "0,00"', () => {
