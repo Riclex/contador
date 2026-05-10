@@ -19,6 +19,8 @@ import { createWebhookHandler } from './lib/webhook.js';
 import logger from './lib/logger.js';
 import { ensureIndex } from './lib/db.js';
 import { WebhookBodySchema } from './lib/schemas.js';
+import { runMigrations } from './lib/migrations.js';
+import { sendWelcomeMessage, setOnboardingState, getOnboardingState } from './lib/onboarding.js';
 
 // --- Angola timezone helper (imported from lib/security.js)
 
@@ -394,15 +396,7 @@ async function replyWithRetry(to, body, retries = 2) {
   }
 }
 
-// --- Migration Guard — prevent redundant migrations on every startup
-async function isMigrationDone(name) {
-  const doc = await db.collection('_migrations').findOne({ _id: name });
-  return doc !== null;
-}
 
-async function markMigrationDone(name) {
-  await db.collection('_migrations').insertOne({ _id: name, timestamp: new Date() });
-}
 
 async function logEvent(eventName, userPhone, metadata = {}) {
   try {
@@ -426,55 +420,9 @@ async function logEvent(eventName, userPhone, metadata = {}) {
   }
 }
 
-// --- User Onboarding
 
-async function sendWelcomeMessage(userPhone) {
-  const welcomeMessage = `Boas! 👋 Sou o Contador, o teu assistente financeiro no WhatsApp.
 
-Regista vendas, gastos e kilapis só mandando mensagens.
 
-Exemplos:
-• "vendi 5000 de pão"
-• "João me deve 2000"
-• "hoje" (vê saldo)
-
-📄 Termos: /termos
-🔒 Privacidade: /privacidade
-
-Aceitas que guardemos os teus dados para fazer os cálculos? Responde "sim" para continuar.`;
-
-  await replyWithRetry(userPhone, welcomeMessage);
-}
-
-async function setOnboardingState(userPhone, state) {
-  const userHash = hashPhone(userPhone);
-  await db.collection('onboarding').updateOne(
-    { user_hash: userHash },
-    { $set: { state, updated_at: new Date() } },
-    { upsert: true }
-  );
-  // Maintain broadcast list for /anunciar (separate from onboarding to keep PII isolated)
-  if (state === OnboardingState.COMPLETED) {
-    await db.collection('broadcast_list').updateOne(
-      { user_hash: userHash },
-      { $set: { phone: userPhone, updated_at: new Date() } },
-      { upsert: true }
-    );
-  }
-}
-
-function normalizeOnboardingState(state) {
-  // Backward compatibility: old documents used lowercase values
-  if (state === 'awaiting_consent') return 'AWAITING_CONSENT';
-  if (state === 'completed') return 'COMPLETED';
-  return state;
-}
-
-async function getOnboardingState(userPhone) {
-  const userHash = hashPhone(userPhone);
-  const doc = await db.collection('onboarding').findOne({ user_hash: userHash });
-  return normalizeOnboardingState(doc?.state) || null;
-}
 
 // --- Routes
 // Wrap async handlers to forward rejected promises to Express error handler
@@ -556,116 +504,8 @@ await ensureIndex(debts, { message_sid: 1 }, { unique: true });
 await ensureIndex(transactions, { user_hash: 1, date: -1 });
 await ensureIndex(transactions, { message_sid: 1 }, { unique: true });
 
-// Migrate existing records: backfill user_hash from user_phone
-try {
-  if (!(await isMigrationDone('backfill_user_hash'))) {
-  const migrateCollection = async (collection) => {
-    let count = 0;
-    const cursor = collection.find({ user_phone: { $exists: true }, user_hash: { $exists: false } }).batchSize(100);
-    for await (const doc of cursor) {
-      await collection.updateOne(
-        { _id: doc._id },
-        { $set: { user_hash: hashPhone(doc.user_phone) } }
-      );
-      count++;
-    }
-    if (count > 0) {
-      logger.info(`[MIGRATE] Backfilled user_hash for ${count} ${collection.collectionName} records.`);
-    }
-    logger.info(`[MIGRATE] ${collection.collectionName} migration complete.`);
-  };
-  await migrateCollection(transactions);
-  await migrateCollection(debts);
-  await migrateCollection(db.collection('onboarding'));
-  await migrateCollection(db.collection('sessions'));
-
-  // Remove raw phone numbers from documents now that user_hash is backfilled
-  const removeUserPhone = async (collection) => {
-    const result = await collection.updateMany(
-      { user_phone: { $exists: true }, user_hash: { $exists: true } },
-      { $unset: { user_phone: "" } }
-    );
-    if (result.modifiedCount > 0) {
-      logger.info(`[MIGRATE] Removed user_phone from ${result.modifiedCount} ${collection.collectionName} records.`);
-    }
-  };
-  await removeUserPhone(transactions);
-  await removeUserPhone(debts);
-  await removeUserPhone(db.collection('onboarding'));
-  await removeUserPhone(db.collection('sessions'));
-
-  // Migrate onboarding phone numbers to broadcast_list, then remove from onboarding
-  const onboardingWithPhone = db.collection('onboarding').find({ phone: { $exists: true } });
-  let broadcastMigrated = 0;
-  for await (const doc of onboardingWithPhone) {
-    if (doc.phone && doc.user_hash && (doc.state === OnboardingState.COMPLETED || doc.state === 'completed')) {
-      await db.collection('broadcast_list').updateOne(
-        { user_hash: doc.user_hash },
-        { $set: { phone: doc.phone, updated_at: new Date() } },
-        { upsert: true }
-      );
-      broadcastMigrated++;
-    }
-    await db.collection('onboarding').updateOne(
-      { _id: doc._id },
-      { $unset: { phone: "" } }
-    );
-  }
-  if (broadcastMigrated > 0) {
-    logger.info(`[MIGRATE] Migrated ${broadcastMigrated} phone numbers from onboarding to broadcast_list`);
-  }
-
-  // Backfill creditor_lower/debtor_lower for existing debt records (index-friendly queries)
-  let debtsCount = 0;
-  const debtsCursor = debts.find({
-    $or: [
-      { creditor_lower: { $exists: false } },
-      { debtor_lower: { $exists: false } }
-    ]
-  }).batchSize(100);
-  for await (const doc of debtsCursor) {
-    const update = {};
-    if (doc.creditor && !doc.creditor_lower) update.creditor_lower = doc.creditor.toLowerCase();
-    if (doc.debtor && !doc.debtor_lower) update.debtor_lower = doc.debtor.toLowerCase();
-    if (Object.keys(update).length > 0) {
-      await debts.updateOne({ _id: doc._id }, { $set: update });
-      debtsCount++;
-    }
-  }
-  if (debtsCount > 0) {
-    logger.info(`[MIGRATE] Backfilled creditor_lower/debtor_lower for ${debtsCount} debt records.`);
-    logger.info('[MIGRATE] Debt normalized fields migration complete.');
-  }
-  await markMigrationDone('backfill_user_hash');
-  } else {
-    logger.info('[MIGRATE] Skipping backfill_user_hash — already done');
-  }
-} catch (err) {
-  logger.error(err, '[MIGRATE] Migration error (non-fatal)');
-}
-
-// Migration: Re-hash from 16-char to 32-char hashes
-try {
-  if (!(await isMigrationDone('hash_16_to_32'))) {
-    logger.info('[MIGRATE] Checking for 16-char user_hash values...');
-    const collections = [transactions, debts, db.collection('onboarding'), db.collection('sessions')];
-    for (const collection of collections) {
-      const field = collection.collectionName === 'sessions' ? 'phone_hash' : 'user_hash';
-      const shortHashDocs = await collection.find({
-        $expr: { $eq: [{ $strLenCP: `$${field}` }, 16] }
-      }).limit(1).toArray();
-      if (shortHashDocs.length > 0) {
-        logger.warn(`[MIGRATE] Found 16-char ${field} values in ${collection.collectionName}. Users with old hashes will appear as new and need to re-onboard.`);
-      }
-    }
-    await markMigrationDone('hash_16_to_32');
-    logger.info('[MIGRATE] hash_16_to_32 migration check complete');
-  } else {
-    logger.info('[MIGRATE] Skipping hash_16_to_32 — already done');
-  }
-} catch (err) {
-  logger.error(err, '[MIGRATE] hash_16_to_32 migration error (non-fatal)');
-}
+// Run all data migrations
+await runMigrations(db, transactions, debts);
 
 // Create indexes on sessions collection (phone_hash replaces phone for privacy)
 await ensureIndex(db.collection('sessions'), { phone_hash: 1 }, { unique: true });
@@ -706,7 +546,9 @@ Object.assign(deps, {
   SESSION_TTL_MS, ADMIN_NUMBERS, TWILIO_WHATSAPP_NUMBER,
   mongo, transactionsSupported,
   checkRateLimit, reply, replyWithRetry, logEvent,
-  getOnboardingState, setOnboardingState, sendWelcomeMessage,
+  sendWelcomeMessage: (userPhone) => sendWelcomeMessage(replyWithRetry, userPhone),
+  getOnboardingState: (userPhone) => getOnboardingState(db, userPhone),
+  setOnboardingState: (userPhone, state) => setOnboardingState(db, userPhone, state),
   getSession, setSession,
   commandHandlers: {
     handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago,
