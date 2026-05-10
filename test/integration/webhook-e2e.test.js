@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { startMongo, stopMongo, clearCollections } from '../helpers/setup.js';
 import { hashPhone, SessionState, OnboardingState } from '../../lib/security.js';
@@ -355,9 +355,8 @@ describe('Webhook E2E Integration Tests', () => {
       });
       assert.equal(res2.status, 204);
 
-      // Dedup prevents command processing, so only one message_sent event is logged
-      // (message_sent is logged before the dedup check, so both log it — only the
-      // command execution is skipped on the second request)
+      // Dedup skips command execution on duplicate MessageSid, so only one
+      // command_used event is logged despite two identical requests.
       const commandEvents = await db.collection('events').countDocuments({
         user_hash: TEST_USER_HASH,
         event_name: 'command_used'
@@ -406,11 +405,14 @@ describe('Webhook E2E Integration Tests', () => {
         state: OnboardingState.COMPLETED,
         updated_at: new Date()
       });
+      process.env.OPENAI_MOCK_RESPONSE = 'true';
+    });
+
+    afterEach(() => {
+      delete process.env.OPENAI_MOCK_RESPONSE;
     });
 
     it('uses OpenAI fallback when regex returns ambiguous', async () => {
-      process.env.OPENAI_MOCK_RESPONSE = 'true';
-
       // First message: parse the financial transaction via OpenAI mock
       const res = await post('/webhook', {
         From: TEST_PHONE,
@@ -435,13 +437,9 @@ describe('Webhook E2E Integration Tests', () => {
       assert.equal(tx.type, 'expense');
       assert.equal(tx.amount, 3000);
       assert.equal(tx.description, 'mercado');
-
-      process.env.OPENAI_MOCK_RESPONSE = '';
     });
 
     it('replies "Não percebi" when OpenAI also returns ambiguous', async () => {
-      process.env.OPENAI_MOCK_RESPONSE = 'true';
-
       const res = await post('/webhook', {
         From: TEST_PHONE,
         Body: 'qualquer coisa',
@@ -452,8 +450,6 @@ describe('Webhook E2E Integration Tests', () => {
       // No transaction should be created
       const txCount = await db.collection('transactions').countDocuments({ user_hash: TEST_USER_HASH });
       assert.equal(txCount, 0);
-
-      process.env.OPENAI_MOCK_RESPONSE = '';
     });
   });
 });
