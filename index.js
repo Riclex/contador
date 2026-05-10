@@ -17,6 +17,7 @@ import { parseDebt, parseTransaction, isOpenaiHealthy, startOpenaiHealthCheck } 
 import { getSession, setSession, SESSION_TTL_MS, sessions } from './lib/session.js';
 import { createWebhookHandler } from './lib/webhook.js';
 import logger from './lib/logger.js';
+import { ensureIndex } from './lib/db.js';
 import { WebhookBodySchema } from './lib/schemas.js';
 
 // --- Angola timezone helper (imported from lib/security.js)
@@ -519,55 +520,41 @@ mongo.on('close', () => {
 
 // --- Database indexes
 // Rate limit TTL index — expired entries auto-deleted by MongoDB
-try { await rateLimits.createIndex({ resetAt: 1 }, { expireAfterSeconds: 0 }); } catch (err) { if (err.code !== 86) throw err; }
+await ensureIndex(rateLimits, { resetAt: 1 }, { expireAfterSeconds: 0 });
 
 // Daily metrics collection — _id index is auto-created by MongoDB (inherently unique)
 
 // --- Event Tracking System
-try { await events.createIndex({ event_name: 1, timestamp: -1 }); } catch (err) { if (err.code !== 86) throw err; }
-try { await events.createIndex({ user_hash: 1, timestamp: -1 }); } catch (err) { if (err.code !== 86) throw err; }
+await ensureIndex(events, { event_name: 1, timestamp: -1 });
+await ensureIndex(events, { user_hash: 1, timestamp: -1 });
 // Audit retention: auto-delete data_deleted records after 2 years (Lei 22/11 compliance)
-try {
-  await events.createIndex(
-    { timestamp: 1 },
-    { expireAfterSeconds: 2 * 365 * 24 * 60 * 60, partialFilterExpression: { event_name: 'data_deleted' } }
-  );
-} catch (err) { if (err.code !== 86) throw err; }
+await ensureIndex(events, { timestamp: 1 }, {
+  expireAfterSeconds: 2 * 365 * 24 * 60 * 60,
+  partialFilterExpression: { event_name: 'data_deleted' }
+});
 
 // Auto-delete stale data_deletion_started records after 7 days (crash recovery markers)
-try {
-  await events.createIndex(
-    { timestamp: 1 },
-    { expireAfterSeconds: 7 * 24 * 60 * 60, partialFilterExpression: { event_name: 'data_deletion_started' } }
-  );
-} catch (err) { if (err.code !== 86) throw err; }
+await ensureIndex(events, { timestamp: 1 }, {
+  expireAfterSeconds: 7 * 24 * 60 * 60,
+  partialFilterExpression: { event_name: 'data_deletion_started' }
+});
 
 // Auto-delete non-critical events after 1 year (PII-adjacent data retention)
-try {
-  await events.createIndex(
-    { timestamp: 1 },
-    { expireAfterSeconds: 365 * 24 * 60 * 60, partialFilterExpression: { event_name: { $nin: ['data_deleted', 'data_deletion_started'] } } }
-  );
-} catch (err) { if (err.code !== 86 && err.code !== 67) throw err; }
+await ensureIndex(events, { timestamp: 1 }, {
+  expireAfterSeconds: 365 * 24 * 60 * 60,
+  partialFilterExpression: { event_name: { $nin: ['data_deleted', 'data_deletion_started'] } }
+});
 
 // Create indexes on debts collection (user_hash replaces user_phone for privacy)
-try { await debts.createIndex({ user_hash: 1, settled: 1 }); } catch (err) { if (err.code !== 86) throw err; }
-try { await debts.createIndex({ user_hash: 1, creditor: 1, debtor: 1 }); } catch (err) { if (err.code !== 86) throw err; }
-try { await debts.createIndex({ user_hash: 1, creditor_lower: 1 }); } catch (err) { if (err.code !== 86) throw err; }
-try { await debts.createIndex({ user_hash: 1, debtor_lower: 1 }); } catch (err) { if (err.code !== 86) throw err; }
-try {
-  await debts.createIndex({ message_sid: 1 }, { unique: true });
-} catch (err) {
-  if (err.code !== 86) throw err;
-}
+await ensureIndex(debts, { user_hash: 1, settled: 1 });
+await ensureIndex(debts, { user_hash: 1, creditor: 1, debtor: 1 });
+await ensureIndex(debts, { user_hash: 1, creditor_lower: 1 });
+await ensureIndex(debts, { user_hash: 1, debtor_lower: 1 });
+await ensureIndex(debts, { message_sid: 1 }, { unique: true });
 
 // Create indexes on transactions collection (user_hash replaces user_phone for privacy)
-try { await transactions.createIndex({ user_hash: 1, date: -1 }); } catch (err) { if (err.code !== 86) throw err; }
-try {
-  await transactions.createIndex({ message_sid: 1 }, { unique: true });
-} catch (err) {
-  if (err.code !== 86) throw err;
-}
+await ensureIndex(transactions, { user_hash: 1, date: -1 });
+await ensureIndex(transactions, { message_sid: 1 }, { unique: true });
 
 // Migrate existing records: backfill user_hash from user_phone
 try {
@@ -681,25 +668,11 @@ try {
 }
 
 // Create indexes on sessions collection (phone_hash replaces phone for privacy)
-try {
-  await db.collection('sessions').createIndex({ phone_hash: 1 }, { unique: true });
-} catch (err) {
-  if (err.code !== 86) throw err;
-}
+await ensureIndex(db.collection('sessions'), { phone_hash: 1 }, { unique: true });
 
 // Create indexes on broadcast_list collection
-try {
-  await db.collection('broadcast_list').createIndex({ user_hash: 1 }, { unique: true });
-} catch (err) {
-  if (err.code !== 86) throw err;
-}
-try {
-  await db.collection('sessions').createIndex({ updatedAt: 1 }, { expireAfterSeconds: SESSION_TTL_MS / 1000 });
-} catch (err) {
-  // 86 = index spec conflict, 67 = immutable option (e.g., changed TTL on existing index)
-  if (err.code !== 86 && err.code !== 67) throw err;
-  logger.warn(`[DB] sessions TTL index already exists (code ${err.code}), skipping`);
-}
+await ensureIndex(db.collection('broadcast_list'), { user_hash: 1 }, { unique: true });
+await ensureIndex(db.collection('sessions'), { updatedAt: 1 }, { expireAfterSeconds: SESSION_TTL_MS / 1000 });
 
 // Pre-populate dedup set from recent records (catches Twilio retries after restart)
 try {
