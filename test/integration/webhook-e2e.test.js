@@ -397,4 +397,63 @@ describe('Webhook E2E Integration Tests', () => {
       assert.equal(res.status, 204);
     });
   });
+
+  describe('OpenAI fallback parsing', () => {
+    beforeEach(async () => {
+      await clearCollections();
+      await db.collection('onboarding').insertOne({
+        user_hash: TEST_USER_HASH,
+        state: OnboardingState.COMPLETED,
+        updated_at: new Date()
+      });
+    });
+
+    it('uses OpenAI fallback when regex returns ambiguous', async () => {
+      process.env.OPENAI_MOCK_RESPONSE = 'true';
+
+      // First message: parse the financial transaction via OpenAI mock
+      const res = await post('/webhook', {
+        From: TEST_PHONE,
+        Body: 'passei 3000 kz no mercado',
+        MessageSid: 'SM_openai_fallback_1'
+      });
+      assert.equal(res.status, 204);
+
+      // Second message: confirm the transaction
+      const res2 = await post('/webhook', {
+        From: TEST_PHONE,
+        Body: 'sim',
+        MessageSid: 'SM_openai_fallback_2'
+      });
+      assert.equal(res2.status, 204);
+
+      // Verify transaction was created (OpenAI mock resolved it, confirmation persisted it)
+      const txCount = await db.collection('transactions').countDocuments({ user_hash: TEST_USER_HASH });
+      assert.equal(txCount, 1);
+
+      const tx = await db.collection('transactions').findOne({ user_hash: TEST_USER_HASH });
+      assert.equal(tx.type, 'expense');
+      assert.equal(tx.amount, 3000);
+      assert.equal(tx.description, 'mercado');
+
+      process.env.OPENAI_MOCK_RESPONSE = '';
+    });
+
+    it('replies "Não percebi" when OpenAI also returns ambiguous', async () => {
+      process.env.OPENAI_MOCK_RESPONSE = 'true';
+
+      const res = await post('/webhook', {
+        From: TEST_PHONE,
+        Body: 'qualquer coisa',
+        MessageSid: 'SM_openai_ambig_1'
+      });
+      assert.equal(res.status, 204);
+
+      // No transaction should be created
+      const txCount = await db.collection('transactions').countDocuments({ user_hash: TEST_USER_HASH });
+      assert.equal(txCount, 0);
+
+      process.env.OPENAI_MOCK_RESPONSE = '';
+    });
+  });
 });
