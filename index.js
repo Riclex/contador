@@ -231,6 +231,7 @@ let mongoConnected = false;
 let serverReady = false;
 let transactionsSupported = false;
 let serverInstance = null; // Exposed for tests via getServerPort()
+let mongo = null; // Module-scoped so closeServer() (declared outside isMainModule) can reach it
 
 // --- Audit trail monitoring
 let logEventFailures = 0; // Counter for failed event logging (exposed in /health and /stats)
@@ -308,7 +309,7 @@ const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS
   : [];
 
 // --- Clients and startup state
-const mongo = new MongoClient(process.env.MONGODB_URI);
+mongo = new MongoClient(process.env.MONGODB_URI); // assigns module-level `mongo`
 
 // MongoDB connection retry with exponential backoff
 // (mongoConnected, serverReady, transactionsSupported, db, transactions, debts, events declared at module level above)
@@ -645,6 +646,24 @@ process.on('uncaughtException', (error) => {
 // Note: checkRateLimit is async and requires MongoDB — not exported for unit testing
 export function getServerPort() {
   return serverInstance ? serverInstance.address().port : null;
+}
+
+// Test helper: close the HTTP server and the internal MongoDB client so the
+// e2e test worker can exit cleanly. Mirrors gracefulShutdown() but WITHOUT
+// process.exit (which would kill the test runner). Safe to call when the
+// server never started (serverInstance/mongo stay null) — e.g. unit imports.
+export async function closeServer() {
+  if (serverInstance) {
+    await new Promise((resolve) => {
+      // Drop any lingering keep-alive sockets so close() resolves promptly
+      // instead of waiting out the client's keep-alive timeout.
+      try { serverInstance.closeAllConnections?.(); } catch { /* noop */ }
+      serverInstance.close(() => resolve());
+    });
+  }
+  if (mongo) {
+    try { await mongo.close(); } catch { /* already closed */ }
+  }
 }
 
 // Test helpers: reset in-memory state between test runs
