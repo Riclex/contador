@@ -71,6 +71,13 @@ describe('Webhook E2E Integration Tests', () => {
     }
     Object.assign(process.env, origEnv);
 
+    // Close the Express server and index.js's internal Mongo client so the
+    // worker can exit cleanly. Without this, open handles keep the event loop
+    // alive and `node --test` hangs until the CI job timeout cancels it.
+    if (indexModule && typeof indexModule.closeServer === 'function') {
+      await indexModule.closeServer();
+    }
+
     await stopMongo();
   });
 
