@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { startMongo, stopMongo, clearCollections } from '../helpers/setup.js';
 import { createTestContext } from '../helpers/context-factory.js';
-import { handleMeusdados, handleApagar, handleAwaitingApagarConfirm, handleDesfazer, handleAwaitingDesfazerConfirm } from '../../lib/commands.js';
+import { handleMeusdados, handleApagar, handleAwaitingApagarConfirm, handleDesfazer, handleAwaitingDesfazerConfirm, handleExportar, MAX_WHATSAPP_CHARS } from '../../lib/commands.js';
 import { SessionState, hashPhone } from '../../lib/security.js';
 
 const TEST_PHONE = 'whatsapp:+244912345678';
@@ -131,5 +131,112 @@ describe('Commands Integration Tests', () => {
     await handleDesfazer(ctx);
 
     assert.ok(messages.some(m => m.body.includes('Não tens registos')));
+  });
+
+  it('/exportar json emits VALID parseable JSON within the message limit', async () => {
+    const uh = TEST_USER_HASH;
+    // Insert enough transactions (with long descriptions) that the full JSON
+    // would exceed MAX_WHATSAPP_CHARS, forcing the budget-fit path.
+    const docs = [];
+    for (let i = 0; i < 60; i++) {
+      docs.push({
+        user_hash: uh, type: i % 2 ? 'income' : 'expense', amount: 1000 + i,
+        description: 'compra grande descricao '.repeat(3),
+        date: new Date(Date.now() - i * 1000), message_sid: 'SM_ex_' + i
+      });
+    }
+    await transactions.insertMany(docs);
+
+    const { ctx, messages } = createTestContext({ transactions, debts, events, db });
+    ctx.text = '/exportar json';
+
+    await handleExportar(ctx);
+
+    assert.ok(messages.length > 0, 'should reply');
+    const body = messages[messages.length - 1].body;
+    assert.ok(body.length <= MAX_WHATSAPP_CHARS, `JSON must fit limit, got ${body.length}`);
+
+    let parsed;
+    assert.doesNotThrow(() => { parsed = JSON.parse(body); }, 'JSON export must be valid (not truncated)');
+    assert.equal(parsed.totals.transaction_count, 60, 'totals.transaction_count must reflect the REAL total');
+    assert.equal(parsed._complete, false, 'partial export must be flagged _complete:false');
+    assert.ok(parsed.transactions.length < 30, 'transactions array must be trimmed to fit (30 would not fit)');
+  });
+
+  it('/desfazer after /pago REOPENS the settled debt instead of deleting it', async () => {
+    const uh = TEST_USER_HASH;
+    const settled = await debts.insertOne({
+      user_hash: uh, type: 'recebido', creditor: 'user', debtor: 'João',
+      creditor_lower: 'user', debtor_lower: 'joão', amount: 2000,
+      description: 'test', date: new Date(Date.now() - 60000), settled: true,
+      settled_date: new Date(), message_sid: 'SM_reopen_1'
+    });
+
+    const { ctx, messages } = createTestContext({ transactions, debts, events, db });
+    ctx.text = '/desfazer';
+    await handleDesfazer(ctx);
+
+    assert.equal(ctx.sessions.get(ctx.sessionKey).state, SessionState.AWAITING_DESFAZER_CONFIRM);
+    const pending = ctx.sessions.get(ctx.sessionKey).pendingDesfazer;
+    assert.equal(pending.type, 'debt_reopen', 'should offer to reopen, not delete');
+    assert.equal(String(pending.id), String(settled.insertedId));
+
+    // Sync ctx.session with the map (the webhook re-reads the session each request)
+    ctx.session = ctx.sessions.get(ctx.sessionKey);
+    ctx.text = 'sim';
+    await handleAwaitingDesfazerConfirm(ctx);
+
+    const doc = await debts.findOne({ _id: settled.insertedId });
+    assert.ok(doc, 'debt must still exist (reopened, not deleted)');
+    assert.equal(doc.settled, false);
+    assert.equal(doc.settled_date, null);
+    assert.ok(messages.some(m => m.body.includes('reaberta')));
+  });
+
+  it('/desfazer targets the newest action — a new transaction beats an older settled debt', async () => {
+    const uh = TEST_USER_HASH;
+    await debts.insertOne({
+      user_hash: uh, type: 'recebido', creditor: 'user', debtor: 'João',
+      creditor_lower: 'user', debtor_lower: 'joão', amount: 2000,
+      description: 'test', date: new Date(Date.now() - 120000), settled: true,
+      settled_date: new Date(Date.now() - 60000), message_sid: 'SM_prec_1'
+    });
+    await transactions.insertOne({
+      user_hash: uh, type: 'income', amount: 5000, description: 'pao',
+      date: new Date(), message_sid: 'SM_prec_2'
+    });
+
+    const { ctx } = createTestContext({ transactions, debts, events, db });
+    ctx.text = '/desfazer';
+    await handleDesfazer(ctx);
+
+    const pending = ctx.sessions.get(ctx.sessionKey).pendingDesfazer;
+    assert.equal(pending.type, 'transaction', 'newer transaction should be the undo target');
+  });
+
+  it('/desfazer deletes the most recent unsettled debt', async () => {
+    const uh = TEST_USER_HASH;
+    await debts.insertOne({
+      user_hash: uh, type: 'recebido', creditor: 'user', debtor: 'João',
+      creditor_lower: 'user', debtor_lower: 'joão', amount: 2000,
+      description: 'test', date: new Date(), settled: false, settled_date: null,
+      message_sid: 'SM_des_debt_1'
+    });
+
+    const { ctx, messages } = createTestContext({ transactions, debts, events, db });
+    ctx.text = '/desfazer';
+    await handleDesfazer(ctx);
+
+    const pending = ctx.sessions.get(ctx.sessionKey).pendingDesfazer;
+    assert.equal(pending.type, 'debt');
+
+    // Sync ctx.session with the map (the webhook re-reads the session each request)
+    ctx.session = ctx.sessions.get(ctx.sessionKey);
+    ctx.text = 'sim';
+    await handleAwaitingDesfazerConfirm(ctx);
+
+    const count = await debts.countDocuments({ user_hash: uh });
+    assert.equal(count, 0, 'unsettled debt should be deleted on confirm');
+    assert.ok(messages.some(m => m.body.includes('apagado')));
   });
 });

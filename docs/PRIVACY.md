@@ -68,9 +68,9 @@ Nos termos da Lei 22/11, você tem direito a:
 
 ### 5.1 Local de Armazenamento
 
-Os dados são armazenados no **MongoDB Atlas** com servidores localizados na **União Europeia (Frankfurt, Alemanha / Zurique, Suíça)**. Esta localização foi escolhida por:
+Os dados são armazenados no **MongoDB Atlas**. A região de armazenamento é definida pela equipa operacional e mantida em conformidade com os requisitos da Lei nº 22/11 de Angola; a localização exata dos servidores pode ser confirmada mediante solicitação. Esta localização foi escolhida por:
 
-- Possuir legislação de proteção de dados considerada adequada (GDPR)
+- Cumprir os requisitos de proteção de dados aplicáveis (Lei nº 22/11 de Angola)
 - Garantir níveis elevados de segurança física e lógica
 - Cumprir requisitos de transferência internacional de dados
 
@@ -115,7 +115,7 @@ O Contador **NÃO vende, aluga ou comercializa** dados pessoais com terceiros pa
 
 Os dados podem ser transferidos para fora de Angola para:
 - Estados Unidos (Twilio, OpenAI)
-- União Europeia (MongoDB Atlas)
+- Região configurada no MongoDB Atlas (a confirmar mediante solicitação)
 
 Estas transferências são necessárias para a prestação do serviço e contam com garantias contratuais adequadas.
 
