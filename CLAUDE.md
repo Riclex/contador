@@ -65,6 +65,7 @@ In-memory LRU cache (1000 entries, 24h TTL) for parsed results; error responses 
 - `/exportar` — Export all your data (Lei 22/11 portability)
 - `/apagar` — Delete all your data atomically (requires confirmation)
 - `/ajuda` — Help menu
+- `/dica` — Financial tip of the day (on-demand, static Angola-localized library, zero OpenAI cost)
 - `/feedback <text>` — Send feedback or report a problem
 - `/privacidade` — Privacy policy
 - `/termos` — Terms of use
