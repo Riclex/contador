@@ -9,7 +9,7 @@ import rateLimit from 'express-rate-limit';
 import { normalize } from './lib/parsers.js';
 import { hashPhone, sanitizeInput, isValidWhatsAppPhone, getAngolaMidnightUTC, ANGOLA_OFFSET_MS, isAffirmative, isConfirmationWord, SessionState, OnboardingState } from './lib/security.js';
 import { getCacheStats } from './lib/cache.js';
-import { COMMANDS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleMetricas } from './lib/handlers/commands.js';
+import { COMMANDS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleDica, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleMetricas } from './lib/handlers/commands.js';
 import { handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm } from './lib/handlers/session.js';
 import { handleDebtParse, handleTransactionParse } from './lib/handlers/parsers.js';
 import { computeDailyMetrics, getOrCreateSnapshot, getRecentSnapshots } from './lib/metrics.js';
@@ -554,8 +554,8 @@ Object.assign(deps, {
   commandHandlers: {
     handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago,
     handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade,
-    handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo,
-    handleMes, handleFeedback, handleExportar, handleMetricas,
+    handleTermos, handleDica, handleMeusdados, handleApagar, handleDesfazer,
+    handleResumo, handleMes, handleFeedback, handleExportar, handleMetricas,
   },
   stateHandlers: {
     handleAwaitingConfirmation, handleAwaitingDebtConfirmation,
@@ -711,6 +711,6 @@ export {
   getCacheStats
 } from './lib/cache.js';
 
-export { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar } from './lib/handlers/commands.js';
+export { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleDica, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar } from './lib/handlers/commands.js';
 export { handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm } from './lib/handlers/session.js';
 export { handleDebtParse, handleTransactionParse } from './lib/handlers/parsers.js';
