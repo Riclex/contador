@@ -1,0 +1,92 @@
+# Auto-managed alert when the Test workflow fails.
+#
+# Why this exists: the Test workflow's integration step used to hang silently
+# (see PR #5) and ran to GitHub's 6h job timeout on every run for ~6 weeks —
+# nobody noticed because nothing surfaced the failure. This workflow opens a
+# GitHub Issue the moment the Test workflow fails, and auto-closes that issue
+# when CI is green again. So a broken build is never silent.
+#
+# Trigger: fires after the "Test" workflow completes (on any branch/PR).
+# Idempotent: reuses one open `ci-failure`-labelled issue; comments on repeats.
+
+name: CI Failure Alert
+
+on:
+  workflow_run:
+    workflows: ["Test"]
+    types: [completed]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: ci-failure-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open or close the failure issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const run = context.payload.workflow_run;
+            const conclusion = run.conclusion;        // success | failure | cancelled | ...
+            const branch = run.head_branch;
+            const commitSha = run.head_sha;
+            const runUrl = run.html_url;
+            const LABEL = 'ci-failure';
+
+            // Ensure the label exists (ignore error if it already does).
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: LABEL });
+            } catch (e) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner, repo, name: LABEL, color: 'd73a4a',
+                  description: 'The Test workflow is currently failing'
+                });
+              } catch (err) {
+                // Label may have been created concurrently; ignore.
+              }
+            }
+
+            // Find an existing open issue with that label.
+            const open = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', per_page: 100
+            });
+            const existing = open.data.find(i =>
+              i.labels.some(l => l.name === LABEL)
+            );
+
+            if (conclusion === 'failure') {
+              const line = `🔴 **Test** workflow failed — branch \`${branch}\` @ ${commitSha.slice(0,7)}\n${runUrl}`;
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number, body: line
+                });
+                core.info(`Commented on existing issue #${existing.number}`);
+              } else {
+                const issue = await github.rest.issues.create({
+                  owner, repo,
+                  title: '🔴 CI (Test workflow) is failing',
+                  body: `${line}\n\nThis issue is auto-managed by the \`ci-failure-alert\` workflow and auto-closes when the Test workflow passes again.`,
+                  labels: [LABEL]
+                });
+                core.info(`Created issue #${issue.data.number}`);
+              }
+            } else if (conclusion === 'success' && existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `✅ CI green again (branch \`${branch}\`). Auto-closing.\n${runUrl}`
+              });
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number, state: 'closed'
+              });
+              core.info(`Closed issue #${existing.number}`);
+            } else {
+              core.info(`Conclusion ${conclusion} — no action.`);
+            }
