@@ -30,9 +30,10 @@ marketing.md
 LAUNCH-STATUS.md
 Ideas.md
 
-# Test files (development only)
+# Throwaway test files (development only)
 test-*.js
-scripts/
+# Note: scripts/ is NOT ignored — scripts/metrics-daily.js is an operational
+# metrics tool (referenced in LAUNCH-STATUS.md) and must ship with the repo.
 
 # Build output
 dist/
