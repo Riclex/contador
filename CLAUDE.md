@@ -114,6 +114,7 @@ Optional:
 - `WEBHOOK_URL` - Full URL for Twilio signature verification (strongly recommended for production; falls back to header-based reconstruction if unset)
 - `ADMIN_NUMBERS` - Comma-separated WhatsApp numbers for admin commands (defaults to empty array if unset)
 - `DATA_STORAGE_LOCATION` - Data-storage location string shown in the `/privacidade` reply (and mirrored in the full privacy policy). If unset, the statement is region-agnostic (Lei 22/11 compliance); set it to the verified region to surface a specific location claim.
+- `TUTORIAL_VIDEO_URL` - Public URL of the ~45s tutorial video. If set, a "Como funciona (1 min)" line is shown in the first-run welcome and `/ajuda`; if unset, the line is omitted (no dead link). Set it after uploading the video (e.g. YouTube unlisted).
 
 ## Testing
 
