@@ -7,8 +7,7 @@ import { pathToFileURL } from "url";
 import helmet from "helmet";
 import rateLimit from 'express-rate-limit';
 import { normalize } from './lib/parsers.js';
-import { hashPhone, sanitizeInput, isValidWhatsAppPhone, getAngolaMidnightUTC, ANGOLA_OFFSET_MS, isAffirmative, isConfirmationWord, SessionState, OnboardingState } from './lib/security.js';
-import { getCacheStats } from './lib/cache.js';
+import { hashPhone, sanitizeInput, getAngolaMidnightUTC, ANGOLA_OFFSET_MS, isAffirmative, isConfirmationWord, SessionState, OnboardingState } from './lib/security.js';
 import { COMMANDS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleDica, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleMetricas } from './lib/handlers/commands.js';
 import { handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm } from './lib/handlers/session.js';
 import { handleDebtParse, handleTransactionParse } from './lib/handlers/parsers.js';
@@ -48,78 +47,6 @@ const deps = {
 
 // SESSION_TTL_MS imported from lib/session.js
 // openaiHealthy managed by lib/openai.js (use isOpenaiHealthy() to read)
-
-// --- Stats Cache (5 minute TTL)
-const STATS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes — daily metrics don't change intra-minute
-let statsCache = {
-  data: null,
-  timestamp: 0
-};
-
-async function getDailyMetrics() {
-  const today = getAngolaMidnightUTC();
-  const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
-  const timeRange = { $gte: today, $lt: tomorrow };
-
-  // Run all 5 independent queries in parallel
-  const [newUsers, activeUsersAgg, totalMessages, confirmedTransactions, debtsCreated] = await Promise.all([
-    events.countDocuments({ event_name: 'first_use', timestamp: timeRange }),
-    events.aggregate([
-      { $match: { timestamp: timeRange } },
-      { $group: { _id: '$user_hash' } },
-      { $count: 'count' }
-    ]).toArray(),
-    events.countDocuments({ event_name: 'message_sent', timestamp: timeRange }),
-    events.countDocuments({ event_name: 'transaction_confirmed', timestamp: timeRange }),
-    events.countDocuments({ event_name: 'debt_created', timestamp: timeRange })
-  ]);
-  const activeUsers = activeUsersAgg[0]?.count || 0;
-
-  return {
-    newUsers,
-    activeUsers,
-    totalMessages,
-    confirmedTransactions,
-    debtsCreated
-  };
-}
-
-async function getEnhancedStats() {
-  // Check cache
-  if (statsCache.data && Date.now() - statsCache.timestamp < STATS_CACHE_TTL_MS) {
-    return statsCache.data;
-  }
-
-  const [dailyMetrics, cacheStats] = await Promise.all([
-    getDailyMetrics(),
-    getCacheStats()
-  ]);
-
-  // Calculate uptime
-  const uptime = process.uptime();
-  const uptimeDays = Math.floor(uptime / 86400);
-  const uptimeHours = Math.floor((uptime % 86400) / 3600);
-  const uptimeMins = Math.floor((uptime % 3600) / 60);
-
-  const stats = {
-    today: dailyMetrics,
-    cache: cacheStats,
-    system: {
-      uptime: `${uptimeDays}d ${uptimeHours}h ${uptimeMins}m`,
-      mongodb: mongoConnected ? '✅' : '❌',
-      timestamp: new Date().toISOString()
-    },
-    auditTrail: { logEventFailures }
-  };
-
-  // Update cache
-  statsCache = {
-    data: stats,
-    timestamp: Date.now()
-  };
-
-  return stats;
-}
 
 async function getRetentionData() {
   const today = getAngolaMidnightUTC();
@@ -566,12 +493,11 @@ Object.assign(deps, {
     handleDebtParse, handleTransactionParse,
   },
   parseTransaction, parseDebt, COMMANDS,
-  getEnhancedStats, getRetentionData,
+  getRetentionData,
   computeDailyMetrics, getOrCreateSnapshot, getRecentSnapshots,
   twilioClient, twilio,
-  hashPhone, sanitizeInput, isValidWhatsAppPhone, normalize,
+  hashPhone, sanitizeInput, normalize,
   isAffirmative, isConfirmationWord, SessionState, OnboardingState,
-  logEventFailures,
 });
 deps.mongoConnected = mongoConnected; // Sync live mutable state
 

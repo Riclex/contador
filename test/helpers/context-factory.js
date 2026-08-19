@@ -34,11 +34,6 @@ export function createTestContext(overrides = {}) {
     parseTransaction: overrides.parseTransaction || (async () => ({ error: 'ambiguous' })),
     parseDebt: overrides.parseDebt || (async () => ({ error: 'ambiguous' })),
     adminNumbers: [],
-    getEnhancedStats: overrides.getEnhancedStats || (async () => ({
-      today: { newUsers: 0, activeUsers: 0, totalMessages: 0, confirmedTransactions: 0, debtsCreated: 0 },
-      cache: { size: 0, hits: 0, misses: 0, hitRate: '0%' },
-      system: { uptime: '0d 0h 0m', mongodb: '✅' }
-    })),
     getRetentionData: overrides.getRetentionData || (async () => ({
       totalUsers: 0,
       cohorts: []
