@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { startMongo, stopMongo, clearCollections } from '../helpers/setup.js';
 import { createTestContext } from '../helpers/context-factory.js';
 import { handleAwaitingConfirmation, handleHoje } from '../../lib/commands.js';
+import { handleTransactionParse } from '../../lib/handlers/parsers.js';
 import { SessionState, hashPhone } from '../../lib/security.js';
 
 const TEST_PHONE = 'whatsapp:+244912345678';
@@ -92,6 +93,54 @@ describe('Transaction Integration Tests', () => {
     assert.equal(docs.length, 0);
     assert.ok(messages.some(m => m.body.includes('inválido')));
     assert.equal(ctx.sessions.get(ctx.sessionKey).state, SessionState.IDLE);
+  });
+
+  it('bare-amount income (e.g. "vendi 1000") defaults to "venda" instead of being rejected', async () => {
+    const { ctx, messages } = createTestContext({
+      transactions, debts, events, db,
+      parseTransaction: async () => ({ type: 'income', amount: 1000, description: '', source: 'regex' })
+    });
+    ctx.text = 'vendi 1000';
+
+    await handleTransactionParse(ctx);
+
+    // Should present a confirmation prompt, NOT "Não percebi"
+    assert.ok(messages.some(m => m.body.includes('Registar')), 'should ask to confirm');
+    assert.ok(!messages.some(m => m.body.includes('Não percebi')), 'should not reject a valid bare amount');
+    // Default description applied for income
+    assert.ok(messages.some(m => m.body.includes('venda')), 'should default description to "venda"');
+    const session = ctx.sessions.get(ctx.sessionKey);
+    assert.equal(session.state, SessionState.AWAITING_CONFIRMATION);
+    assert.equal(session.pending.description, 'venda');
+    assert.equal(session.pending.amount, 1000);
+  });
+
+  it('bare-amount expense (e.g. "gastei 500") defaults to "gasto"', async () => {
+    const { ctx, messages } = createTestContext({
+      transactions, debts, events, db,
+      parseTransaction: async () => ({ type: 'expense', amount: 500, description: '', source: 'regex' })
+    });
+    ctx.text = 'gastei 500';
+
+    await handleTransactionParse(ctx);
+
+    assert.ok(messages.some(m => m.body.includes('gasto')), 'should default description to "gasto"');
+    assert.ok(!messages.some(m => m.body.includes('Não percebi')), 'should not reject a valid bare amount');
+    const session = ctx.sessions.get(ctx.sessionKey);
+    assert.equal(session.state, SessionState.AWAITING_CONFIRMATION);
+    assert.equal(session.pending.description, 'gasto');
+  });
+
+  it('truly ambiguous parse (no type) is still rejected', async () => {
+    const { ctx, messages } = createTestContext({
+      transactions, debts, events, db,
+      parseTransaction: async () => ({ error: 'ambiguous' })
+    });
+    ctx.text = 'comprei pão';
+
+    await handleTransactionParse(ctx);
+
+    assert.ok(messages.some(m => m.body.includes('Não percebi')), 'ambiguous parse should still be rejected');
   });
 
   it('hoje shows correct daily total', async () => {
