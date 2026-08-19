@@ -6,6 +6,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a WhatsApp-based finance tracking MVP that allows users to record income, expenses, and debts via WhatsApp messages in Portuguese. Transaction and debt parsing uses a hybrid approach: a fast regex parser for standard patterns (free) with OpenAI GPT-4o-mini as a fallback for ambiguous cases.
 
+## Coding Rules
+
+Engineering discipline rules (source: `coding_rules.txt`). They apply to all work in this repository and override default behavior where they conflict. Notably, the parse pipeline (regex-first, LLM-fallback) is Rule 5 made architectural — keep it that way.
+
+1. **Think Before Coding** — State assumptions explicitly. Ask rather than guess. Push back when a simpler approach exists. Stop when confused.
+2. **Simplicity First** — Minimum code that solves the problem. Nothing speculative. No abstractions for single-use code.
+3. **Surgical Changes** — Touch only what you must. Don't improve adjacent code. Match existing style. Don't refactor what isn't broken.
+4. **Goal-Driven Execution** — Define success criteria. Loop until verified. Strong success criteria let Claude loop independently.
+5. **Use the model only for judgment calls** — Use for: classification, drafting, summarization, extraction. Do NOT use for: routing, retries, status-code handling, deterministic transforms. If code can answer, code answers.
+6. **Token budgets are not advisory** — Per-task: 4,000 generated tokens. Per-session: 30,000 accumulated. Mandated first-reads of in-scope files (Rule 8, bounded by Rule 3) are exempt from the per-task cap; re-reads of files already in context and speculative reads beyond your surgical scope are not. If approaching the per-session budget, summarize and start fresh — and carry the Rule 8 conclusions (why code is structured as it is, caller/export relationships) forward so the restart stays grounded. Surface the breach. Do not silently overrun.
+7. **Surface conflicts, don't average them** — If two patterns contradict, pick one (more recent / more tested). Explain why. Flag the other for cleanup. Don't blend conflicting patterns.
+8. **Read before you write** — Before adding code, read exports, immediate callers, shared utilities. If unsure why existing code is structured a certain way, ask. Reads mandated here are bounded by Rule 3 (scope) and exempt from Rule 6's per-task cap.
+9. **Tests verify intent, not just behavior** — Tests must encode WHY behavior matters, not just WHAT it does. A test that can't fail when business logic changes is wrong.
+10. **Checkpoint after every significant step** — Summarize what was done, what's verified, what's left. Don't continue from a state you can't describe back. If you lose track, stop and restate.
+11. **Match the codebase's conventions, even if you disagree** — Conformance > taste inside the codebase. If you think a convention is harmful, surface it. Don't fork it silently.
+12. **Fail loud** — "Completed" is wrong if anything was skipped silently. "Tests pass" is wrong if any were skipped. Default to surfacing uncertainty, not hiding it.
+
 ## Architecture
 
 Modular Express.js application with handlers extracted into `lib/` modules:
