@@ -9,7 +9,7 @@ import rateLimit from 'express-rate-limit';
 import { normalize } from './lib/parsers.js';
 import { hashPhone, sanitizeInput, getAngolaMidnightUTC, ANGOLA_OFFSET_MS, isAffirmative, isConfirmationWord, SessionState, OnboardingState } from './lib/security.js';
 import { COMMANDS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleDica, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleMetricas } from './lib/handlers/commands.js';
-import { handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm } from './lib/handlers/session.js';
+import { handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleAwaitingReferralName, handleAwaitingReferralPhone } from './lib/handlers/session.js';
 import { handleDebtParse, handleTransactionParse } from './lib/handlers/parsers.js';
 import { computeDailyMetrics, getOrCreateSnapshot, getRecentSnapshots } from './lib/metrics.js';
 import { parseDebt, parseTransaction, isOpenaiHealthy, startOpenaiHealthCheck } from './lib/openai.js';
@@ -34,6 +34,7 @@ let db;
 let transactions;
 let debts;
 let events;
+let referrals;
 
 const processingUsers = new Set(); // Per-user lock to prevent concurrent webhook processing
 
@@ -287,7 +288,7 @@ const twilioClient = twilio(
 
 // OpenAI and session management imported from lib/
 //   - parseDebt, parseTransaction, isOpenaiHealthy from lib/openai.js
-//   - getSession, setSession, deleteSession, SESSION_TTL_MS, sessions from lib/session.js
+//   - getSession, setSession, SESSION_TTL_MS, sessions from lib/session.js
 
 const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER || "whatsapp:+14155238886";
 
@@ -377,6 +378,7 @@ debts = db.collection("debts");
 events = db.collection("events");
 rateLimits = db.collection("rate_limits");
 dailyMetrics = db.collection("daily_metrics");
+referrals = db.collection("referrals");
 
 // Monitor connection health
 let reconnectInProgress = false;
@@ -442,6 +444,10 @@ await ensureIndex(db.collection('sessions'), { phone_hash: 1 }, { unique: true }
 await ensureIndex(db.collection('broadcast_list'), { user_hash: 1 }, { unique: true });
 await ensureIndex(db.collection('sessions'), { updatedAt: 1 }, { expireAfterSeconds: SESSION_TTL_MS / 1000 });
 
+// Create indexes on referrals collection (one pending referral per referred phone)
+await ensureIndex(referrals, { referred_hash: 1 }, { unique: true });
+await ensureIndex(referrals, { referrer_hash: 1, status: 1 });
+
 // Pre-populate dedup set from recent records (catches Twilio retries after restart)
 try {
   const recentTxSids = await transactions.find({}, { projection: { message_sid: 1 } }).sort({ date: -1 }).limit(MAX_PROCESSED_MESSAGES).toArray();
@@ -469,7 +475,7 @@ try {
 
 // --- Populate deps and register webhook route (after all init is complete) ---
 Object.assign(deps, {
-  db, transactions, debts, events, rateLimits, dailyMetrics,
+  db, transactions, debts, events, rateLimits, dailyMetrics, referrals,
   sessions, processingUsers, processedMessages, MAX_PROCESSED_MESSAGES,
   SESSION_TTL_MS, ADMIN_NUMBERS, TWILIO_WHATSAPP_NUMBER,
   mongo, transactionsSupported,
@@ -488,6 +494,7 @@ Object.assign(deps, {
     handleAwaitingConfirmation, handleAwaitingDebtConfirmation,
     handleAwaitingPagoConfirm, handleAwaitingDebtorName,
     handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm,
+    handleAwaitingReferralName, handleAwaitingReferralPhone,
   },
   parseHandlers: {
     handleDebtParse, handleTransactionParse,
@@ -637,6 +644,6 @@ export {
   getCacheStats
 } from './lib/cache.js';
 
-export { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleDica, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar } from './lib/handlers/commands.js';
-export { handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm } from './lib/handlers/session.js';
+export { COMMANDS, MAX_WHATSAPP_CHARS, handleHoje, handleQuemedeve, handleQuemdevo, handleKilapi, handlePago, handleStats, handleRetencao, handleAnunciar, handleAjuda, handlePrivacidade, handleTermos, handleDica, handleMeusdados, handleApagar, handleDesfazer, handleResumo, handleMes, handleFeedback, handleExportar, handleIndicar, handleReferidos } from './lib/handlers/commands.js';
+export { handleAwaitingConfirmation, handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm, handleAwaitingReferralName, handleAwaitingReferralPhone } from './lib/handlers/session.js';
 export { handleDebtParse, handleTransactionParse } from './lib/handlers/parsers.js';

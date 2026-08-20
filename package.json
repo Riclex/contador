@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "test": "node --test test/*.test.js",
-    "test:integration": "node --test test/integration/*.test.js",
-    "test:all": "node --test test/*.test.js test/integration/*.test.js",
+    "test:integration": "node --test --test-concurrency=1 test/integration/*.test.js",
+    "test:all": "node --test --test-concurrency=1 test/*.test.js test/integration/*.test.js",
     "test:coverage": "node --test --experimental-test-coverage test/*.test.js test/integration/*.test.js",
     "lint": "eslint ."
   },

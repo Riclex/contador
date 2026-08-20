@@ -42,7 +42,9 @@ jobs:
         run: npm test
 
       - name: Run integration tests
-        run: node --test test/integration/*.test.js
+        # Serialize test files: each starts a MongoMemoryReplSet, and parallel
+        # files race on port allocation ("Port already in use").
+        run: node --test --test-concurrency=1 test/integration/*.test.js
 
       - name: Run all tests
         run: npm run test:all

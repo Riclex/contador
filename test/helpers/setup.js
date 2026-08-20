@@ -22,6 +22,8 @@ export async function startMongo() {
   await db.collection('events').createIndex({ user_hash: 1, timestamp: -1 });
   await db.collection('sessions').createIndex({ phone_hash: 1 }, { unique: true });
   await db.collection('rate_limits').createIndex({ resetAt: 1 }, { expireAfterSeconds: 0 });
+  await db.collection('referrals').createIndex({ referred_hash: 1 }, { unique: true });
+  await db.collection('referrals').createIndex({ referrer_hash: 1, status: 1 });
 
   return { client, db, uri };
 }
@@ -32,7 +34,7 @@ export async function stopMongo() {
 }
 
 export async function clearCollections() {
-  const collections = ['transactions', 'debts', 'events', 'sessions', 'onboarding', 'rate_limits'];
+  const collections = ['transactions', 'debts', 'events', 'sessions', 'onboarding', 'rate_limits', 'referrals'];
   await Promise.all(collections.map(c => db.collection(c).deleteMany({})));
 }
 
