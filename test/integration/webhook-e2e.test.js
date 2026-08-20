@@ -246,6 +246,56 @@ describe('Webhook E2E Integration Tests', () => {
     });
   });
 
+  describe('Referral routing (/indicar)', () => {
+    const REFERRED_PHONE = 'whatsapp:+244987654321';
+    const REFERRED_HASH = hashPhone(REFERRED_PHONE);
+
+    beforeEach(async () => {
+      await clearCollections();
+      await db.collection('onboarding').insertOne({
+        user_hash: TEST_USER_HASH,
+        state: OnboardingState.COMPLETED,
+        updated_at: new Date()
+      });
+    });
+
+    it('routes the one-shot form /indicar <nome> <telefone> to the handler (not the parser)', async () => {
+      // Regression guard: EXACT_COMMANDS only matches the bare `/indicar`, so the
+      // documented one-message form must be caught by REGEX_COMMANDS. Without that
+      // route the input fell through to the debt/transaction parser and no referral
+      // was created. This test exercises the real webhook dispatch, not handleIndicar
+      // directly, so it catches that gap.
+      const res = await post('/webhook', {
+        From: TEST_PHONE,
+        Body: '/indicar Maria 244987654321',
+        MessageSid: 'SM_ref_route_oneshot_1'
+      });
+      assert.equal(res.status, 204);
+
+      const doc = await db.collection('referrals').findOne({ referred_hash: REFERRED_HASH });
+      assert.ok(doc, 'referral record created via webhook dispatch');
+      assert.equal(doc.status, 'pending');
+      // The name keeps its original casing — the webhook threads the sanitized-but-not-
+      // lowercased text through ctx.rawText so referral names aren't stored lowercased.
+      assert.equal(doc.name, 'Maria');
+      assert.equal(doc.referrer_hash, TEST_USER_HASH);
+      assert.equal(doc.referred_phone, undefined, 'raw referred phone must never be stored');
+    });
+
+    it('the bare /indicar starts the two-step flow (prompts for name)', async () => {
+      const res = await post('/webhook', {
+        From: TEST_PHONE,
+        Body: '/indicar',
+        MessageSid: 'SM_ref_route_bare_1'
+      });
+      assert.equal(res.status, 204);
+
+      const session = await db.collection('sessions').findOne({ phone_hash: TEST_USER_HASH });
+      assert.ok(session, 'session created');
+      assert.equal(session.state, SessionState.AWAITING_REFERRAL_NAME);
+    });
+  });
+
   describe('Session state dispatch', () => {
     beforeEach(async () => {
       await clearCollections();

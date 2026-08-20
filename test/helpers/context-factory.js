@@ -20,7 +20,9 @@ export function createTestContext(overrides = {}) {
     debts: overrides.debts || null,
     events: overrides.events || null,
     rateLimits: overrides.rateLimits || null,
+    referrals: overrides.referrals || null,
     mongoClient: overrides.mongoClient || null,
+    mongoConnected: overrides.mongoConnected !== undefined ? overrides.mongoConnected : true,
     transactionsSupported: overrides.transactionsSupported !== undefined ? overrides.transactionsSupported : true,
     reply: (body) => { messages.push({ body }); },
     replyWithRetry: (body) => { messages.push({ body }); },
@@ -34,11 +36,6 @@ export function createTestContext(overrides = {}) {
     parseTransaction: overrides.parseTransaction || (async () => ({ error: 'ambiguous' })),
     parseDebt: overrides.parseDebt || (async () => ({ error: 'ambiguous' })),
     adminNumbers: [],
-    getEnhancedStats: overrides.getEnhancedStats || (async () => ({
-      today: { newUsers: 0, activeUsers: 0, totalMessages: 0, confirmedTransactions: 0, debtsCreated: 0 },
-      cache: { size: 0, hits: 0, misses: 0, hitRate: '0%' },
-      system: { uptime: '0d 0h 0m', mongodb: '✅' }
-    })),
     getRetentionData: overrides.getRetentionData || (async () => ({
       totalUsers: 0,
       cohorts: []
