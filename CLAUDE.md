@@ -29,8 +29,8 @@ Modular Express.js application with handlers extracted into `lib/` modules:
 
 - **Entry point / composition root**: `index.js` — Express server bootstrap, port binding, MongoDB connection + retry, index creation, dedup-set pre-population, transaction-support detection, and the `deps` object wired into the webhook handler. Also holds inline helpers: `reply`/`replyWithRetry` (Twilio), `logEvent` (audit), `checkRateLimit`, and the admin stats/retention aggregations. The actual request handling is delegated to `lib/` modules below.
 - **Webhook handler**: `lib/webhook.js` — `createWebhookHandler(deps)` factory returning the `POST /webhook` Express route handler; reads mutable `serverReady`/`mongoConnected` live via `deps` (not destructured) so MongoDB reconnects reflect immediately
-- **Command handlers**: `lib/handlers/commands.js` — user + admin command handler functions (21 handlers) receiving a `ctx` context object; `COMMANDS` Set is the single source of truth for session-reset logic
-- **Session state handlers**: `lib/handlers/session.js` — session state machine handlers (6 handlers)
+- **Command handlers**: `lib/handlers/commands.js` — user + admin command handler functions (22 handlers) receiving a `ctx` context object; `COMMANDS` Set is the single source of truth for session-reset logic
+- **Session state handlers**: `lib/handlers/session.js` — session state machine handlers (8 handlers)
 - **Fall-through parsers**: `lib/handlers/parsers.js` — debt and transaction parsing with OpenAI fallback
 - **Security utilities**: `lib/security.js` — hashing, sanitization, validation, session/onboarding states, schema validators, formatting
 - **Parsers**: `lib/parsers.js` — regex-based transaction and debt parsers
@@ -39,12 +39,13 @@ Modular Express.js application with handlers extracted into `lib/` modules:
 - **Metrics**: `lib/metrics.js` — daily metrics computation (parallel aggregations), returning-user cohort, snapshot persistence (`getOrCreateSnapshot`/`getRecentSnapshots`), `formatDelta`
 - **Migrations**: `lib/migrations.js` — idempotent startup migrations (`backfill_user_hash`, normalized debt fields, 16→32 char hash check) guarded by the `_migrations` collection
 - **Onboarding**: `lib/onboarding.js` — consent flow: welcome message, `getOnboardingState`/`setOnboardingState`; on COMPLETED, writes the raw phone to `broadcast_list`
+- **Referrals**: `lib/referrals.js` — referral program: phone normalization/validation, `createReferral`/`activateReferral`/`maybeEarnReferral`/`scrubReferredPerson`, admin funnel stats
 - **DB helpers**: `lib/db.js` — `ensureIndex` (ignores code 86/67 "already exists" conflicts)
 - **Schemas**: `lib/schemas.js` — Zod `WebhookBodySchema` (phone format + 2000-char body limit)
 - **Logger**: `lib/logger.js` — Pino instance (pretty in dev, JSON in prod/test)
 - **Cache**: `lib/cache.js` — LRU response cache for parsed results + OpenAI cost/cap tracking
 - **Commands barrel**: `lib/commands.js` — backward-compat re-exports from `lib/handlers/*.js` (new code should import directly)
-- **Database**: MongoDB (native driver) with `transactions`, `debts`, `events`, `sessions`, `rate_limits`, `feedback`, `onboarding`, `broadcast_list`, `daily_metrics`, `_migrations` collections
+- **Database**: MongoDB (native driver) with `transactions`, `debts`, `events`, `sessions`, `rate_limits`, `feedback`, `onboarding`, `broadcast_list`, `daily_metrics`, `referrals`, `_migrations` collections
 - **LLM Parsing**: OpenAI GPT-4o-mini for ambiguous cases (fallback only)
 - **Messaging**: Twilio WhatsApp API for user communication
 
@@ -83,6 +84,7 @@ In-memory LRU cache (1000 entries, 24h TTL) for parsed results; error responses 
 - `/apagar` — Delete all your data atomically (requires confirmation)
 - `/ajuda` — Help menu
 - `/dica` — Financial tip of the day (on-demand, static Angola-localized library, zero OpenAI cost)
+- `/indicar <nome> <telefone>` — Refer a vendor and earn data credit when they start using (two-step flow if args omitted)
 - `/feedback <text>` — Send feedback or report a problem
 - `/privacidade` — Privacy policy
 - `/termos` — Terms of use
@@ -92,10 +94,11 @@ In-memory LRU cache (1000 entries, 24h TTL) for parsed results; error responses 
 - `/metricas` — 7-day trend table with financial totals and OpenAI stats (admin only)
 - `/retencao` — Retention analytics with day-1/7/30 cohorts (admin only)
 - `/anunciar <text>` — Broadcast message to all consented users (admin only)
+- `/referidos` — Referral funnel view (pending/activated/earned/paid counts) (admin only)
 
 ## Session States
 
-`IDLE`, `AWAITING_CONFIRMATION`, `AWAITING_DEBT_CONFIRMATION`, `AWAITING_DEBTOR_NAME`, `AWAITING_PAGO_CONFIRM`, `AWAITING_APAGAR_CONFIRM`, `AWAITING_DESFAZER_CONFIRM`
+`IDLE`, `AWAITING_CONFIRMATION`, `AWAITING_DEBT_CONFIRMATION`, `AWAITING_DEBTOR_NAME`, `AWAITING_PAGO_CONFIRM`, `AWAITING_APAGAR_CONFIRM`, `AWAITING_DESFAZER_CONFIRM`, `AWAITING_REFERRAL_NAME`, `AWAITING_REFERRAL_PHONE`
 
 Onboarding states (stored in `onboarding` collection, separate from session): `AWAITING_CONSENT`, `COMPLETED`
 
@@ -184,6 +187,20 @@ node --check index.js
 }
 ```
 
+### Referrals Collection
+```javascript
+{
+  referrer_hash: string,    // SHA-256 of referrer phone
+  referred_hash: string,    // SHA-256 of referred phone (raw phone never stored)
+  name: string,             // Referred person's name (plaintext, max 50 chars)
+  status: "pending" | "activated" | "earned" | "paid",
+  created_at: Date,
+  activated_at: Date|null,
+  earned_at: Date|null,
+  paid_at: Date|null
+}
+```
+
 ### Feedback Collection
 ```javascript
 {
@@ -259,6 +276,7 @@ Current Indexes:
 - `events`: `{ event_name: 1, timestamp: -1 }`, `{ user_hash: 1, timestamp: -1 }`, `{ timestamp: 1 }` (partial TTL on `data_deleted` — 2 year retention)
 - `rate_limits`: `{ resetAt: 1 }` (TTL auto-delete)
 - `broadcast_list`: `{ user_hash: 1 }` (unique)
+- `referrals`: `{ referred_hash: 1 }` (unique), `{ referrer_hash: 1, status: 1 }`
 - `daily_metrics`: `{ _id: 1 }` (auto-created, inherently unique)
 - `_migrations`: no special indexes
 

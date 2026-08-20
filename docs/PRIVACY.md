@@ -16,6 +16,7 @@ O **Contador** é um assistente financeiro via WhatsApp que permite aos usuário
 | **Transações** (vendas, gastos, descrições) | Fornecer resumos de saldo e histórico | Consentimento |
 | **Dívidas** (credor, devedor, valores, descrições) | Rastrear e gerenciar dívidas | Consentimento |
 | **Eventos de auditoria** (primeiro uso, consentimento, mensagens enviadas) | Compliance e segurança | Legítimo interesse |
+| **Indicações** (nome em texto claro e número de WhatsApp da pessoa indicada, armazenado com hash SHA-256) | Programa de referidos — creditar o utilizador que indicou | Legítimo interesse |
 
 ### 2.2 Dados que NÃO Coletamos
 
@@ -52,7 +53,11 @@ O processamento de dados pessoais no Contador é baseado em:
 - **Como obtemos:** Através do fluxo de onboarding onde o usuário deve responder "sim" para aceitar o armazenamento de dados.
 - **Revogação:** O usuário pode retirar o consentimento a qualquer momento através do comando `/apagar`.
 
-### 4.2 Direitos do Titular dos Dados
+### 4.2 Legítimo Interesse
+- O programa de referidos (`/indicar`) processa o nome e o número (com hash SHA-256) da pessoa indicada para creditar o utilizador que a indicou. Este tratamento baseia-se no interesse legítimo de operar o programa de referidos, e não no consentimento da pessoa indicada (que ainda não é utilizadora).
+- **Oposição:** A pessoa indicada pode opor-se ao tratamento a qualquer momento através do comando `/apagar`, que elimina o seu nome e número do registo de referidos.
+
+### 4.3 Direitos do Titular dos Dados
 
 Nos termos da Lei 22/11, você tem direito a:
 
@@ -79,6 +84,7 @@ Os dados são armazenados no **MongoDB Atlas**. A região de armazenamento é de
 | Tipo de Dado | Período de Retenção |
 |--------------|---------------------|
 | Dados de transações e dívidas | Até solicitação de exclusão via `/apagar` |
+| Indicações (programa de referidos) | Até solicitação de exclusão via `/apagar` |
 | Eventos de auditoria | 2 anos após exclusão da conta (eliminação automática via índice TTL) |
 | Registos de limitação de uso (rate limits) | Eliminados automaticamente após 24h ou ao usar `/apagar` |
 | Sessões de usuário | 30 minutos após última atividade |
@@ -88,13 +94,13 @@ Os dados são armazenados no **MongoDB Atlas**. A região de armazenamento é de
 
 Implementamos as seguintes medidas técnicas e organizacionais:
 
-- **Pseudonimização:** Números de telefone armazenados com hash SHA-256 em todas as coleções (transações, dívidas, eventos, sessões e onboarding). Exceção: a coleção `broadcast_list` armazena o número em texto claro, isolado das outras coleções, exclusivamente para entrega de anúncios via `/anunciar`. Este número é eliminado ao usar `/apagar`.
+- **Pseudonimização:** Números de telefone armazenados com hash SHA-256 em todas as coleções (transações, dívidas, eventos, sessões, onboarding e referidos). Exceção: a coleção `broadcast_list` armazena o número em texto claro, isolado das outras coleções, exclusivamente para entrega de anúncios via `/anunciar`. Este número é eliminado ao usar `/apagar`.
 - **Criptografia em trânsito:** HTTPS/TLS para todas as comunicações
 - **Verificação de assinatura:** Validação SHA256 obrigatória de webhooks Twilio (sem caminho de bypass)
 - **Sanitização de input:** Remoção de caracteres de controle, caracteres de largura zero e overrides direcionais Unicode
 - **Rate limiting:** 50 mensagens/usuário/dia para prevenir abuso; registos eliminados ao usar `/apagar`
 - **Gestão de sessão:** Sessões com TTL de 30 minutos, armazenadas com hash (nunca em texto claro)
-- **Eliminação atômica:** O comando `/apagar` deleta todos os dados de forma atômica (transação MongoDB), incluindo transações, dívidas, eventos, sessões e registos de limitação de uso
+- **Eliminação atômica:** O comando `/apagar` deleta todos os dados de forma atômica (transação MongoDB), incluindo transações, dívidas, eventos, sessões, registos de limitação de uso e indicações de referidos
 - **Cabeçalhos de segurança HTTP:** Middleware `helmet` para proteção contra vulnerabilidades web comuns
 
 ## 6. Partilha de Dados
