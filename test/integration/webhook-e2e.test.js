@@ -7,7 +7,7 @@ const TEST_PHONE = 'whatsapp:+244912345678';
 const TEST_USER_HASH = hashPhone(TEST_PHONE);
 
 describe('Webhook E2E Integration Tests', () => {
-  let serverPort, db, mongoClient, baseUrl, indexModule;
+  let serverPort, db, baseUrl, indexModule;
   let origEnv = {};
 
   before(async () => {
@@ -17,7 +17,6 @@ describe('Webhook E2E Integration Tests', () => {
     // Start in-memory MongoDB
     const setup = await startMongo();
     db = setup.db;
-    mongoClient = setup.client;
 
     // Set env vars for server startup — construct URI with database name
     process.env.NODE_ENV = 'test';

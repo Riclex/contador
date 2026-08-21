@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeDailyMetrics, getOrCreateSnapshot, getRecentSnapshots, formatDelta, getAngolaDateStr } from '../lib/metrics.js';
+import { computeDailyMetrics, getOrCreateSnapshot, formatDelta, getAngolaDateStr } from '../lib/metrics.js';
 import { trackOpenAICall, getOpenAIStats } from '../lib/cache.js';
 
 describe('formatDelta', () => {
