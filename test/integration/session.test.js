@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { SessionState, isConfirmationWord } from '../../lib/security.js';
-import { COMMANDS } from '../../lib/commands.js';
+import { COMMANDS } from '../../lib/handlers/commands.js';
 
 describe('Session State Integration Tests', () => {
   it('command during AWAITING_CONFIRMATION resets to IDLE', () => {

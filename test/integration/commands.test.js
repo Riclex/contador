@@ -2,7 +2,8 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { startMongo, stopMongo, clearCollections } from '../helpers/setup.js';
 import { createTestContext } from '../helpers/context-factory.js';
-import { handleMeusdados, handleAwaitingApagarConfirm, handleDesfazer, handleAwaitingDesfazerConfirm, handleExportar, MAX_WHATSAPP_CHARS } from '../../lib/commands.js';
+import { handleMeusdados, handleDesfazer, handleExportar, MAX_WHATSAPP_CHARS } from '../../lib/handlers/commands.js';
+import { handleAwaitingApagarConfirm, handleAwaitingDesfazerConfirm } from '../../lib/handlers/session.js';
 import { SessionState, hashPhone } from '../../lib/security.js';
 
 const TEST_PHONE = 'whatsapp:+244912345678';

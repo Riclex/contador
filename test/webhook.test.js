@@ -6,7 +6,7 @@ import {
   isValidDebtName
 } from '../lib/security.js';
 import { isAffirmative, isNegative, isConfirmationWord, formatKz } from '../lib/security.js';
-import { COMMANDS } from '../lib/commands.js';
+import { COMMANDS } from '../lib/handlers/commands.js';
 
 // --- Session State Enum Validation ---
 

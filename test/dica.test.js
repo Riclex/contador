@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestContext } from './helpers/context-factory.js';
-import { handleDica } from '../lib/commands.js';
+import { handleDica } from '../lib/handlers/commands.js';
 import { TIPS } from '../lib/tips.js';
 
 describe('/dica', () => {

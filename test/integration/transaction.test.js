@@ -2,7 +2,8 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { startMongo, stopMongo, clearCollections } from '../helpers/setup.js';
 import { createTestContext } from '../helpers/context-factory.js';
-import { handleAwaitingConfirmation, handleHoje } from '../../lib/commands.js';
+import { handleAwaitingConfirmation } from '../../lib/handlers/session.js';
+import { handleHoje } from '../../lib/handlers/commands.js';
 import { handleTransactionParse } from '../../lib/handlers/parsers.js';
 import { SessionState, hashPhone } from '../../lib/security.js';
 

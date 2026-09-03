@@ -8,7 +8,7 @@ This is a WhatsApp-based finance tracking MVP that allows users to record income
 
 ## Coding Rules
 
-Engineering discipline rules (source: `coding_rules.txt`). They apply to all work in this repository and override default behavior where they conflict. Notably, the parse pipeline (regex-first, LLM-fallback) is Rule 5 made architectural — keep it that way.
+Engineering discipline rules — this file is their single source. They apply to all work in this repository and override default behavior where they conflict. Notably, the parse pipeline (regex-first, LLM-fallback) is Rule 5 made architectural — keep it that way.
 
 1. **Think Before Coding** — State assumptions explicitly. Ask rather than guess. Push back when a simpler approach exists. Stop when confused.
 2. **Simplicity First** — Minimum code that solves the problem. Nothing speculative. No abstractions for single-use code.
@@ -44,7 +44,6 @@ Modular Express.js application with handlers extracted into `lib/` modules:
 - **Schemas**: `lib/schemas.js` — Zod `WebhookBodySchema` (phone format + 2000-char body limit)
 - **Logger**: `lib/logger.js` — Pino instance (pretty in dev, JSON in prod/test)
 - **Cache**: `lib/cache.js` — LRU response cache for parsed results + OpenAI cost/cap tracking
-- **Commands barrel**: `lib/commands.js` — backward-compat re-exports from `lib/handlers/*.js` (new code should import directly)
 - **Database**: MongoDB (native driver) with `transactions`, `debts`, `events`, `sessions`, `rate_limits`, `feedback`, `onboarding`, `broadcast_list`, `daily_metrics`, `referrals`, `_migrations` collections
 - **LLM Parsing**: OpenAI GPT-4o-mini for ambiguous cases (fallback only)
 - **Messaging**: Twilio WhatsApp API for user communication

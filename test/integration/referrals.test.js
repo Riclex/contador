@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { startMongo, stopMongo, clearCollections } from '../helpers/setup.js';
 import { createTestContext } from '../helpers/context-factory.js';
-import { handleIndicar, handleReferidos } from '../../lib/commands.js';
+import { handleIndicar, handleReferidos } from '../../lib/handlers/commands.js';
 import { handleAwaitingReferralName, handleAwaitingReferralPhone, handleAwaitingConfirmation, handleAwaitingApagarConfirm } from '../../lib/handlers/session.js';
 import { SessionState, hashPhone } from '../../lib/security.js';
 import { createReferral, activateReferral, maybeEarnReferral, REFERRAL_STATUS } from '../../lib/referrals.js';

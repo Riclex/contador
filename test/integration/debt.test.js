@@ -2,7 +2,8 @@ import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { startMongo, stopMongo, clearCollections } from '../helpers/setup.js';
 import { createTestContext } from '../helpers/context-factory.js';
-import { handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName, handlePago } from '../../lib/commands.js';
+import { handleAwaitingDebtConfirmation, handleAwaitingPagoConfirm, handleAwaitingDebtorName } from '../../lib/handlers/session.js';
+import { handlePago } from '../../lib/handlers/commands.js';
 import { SessionState, hashPhone } from '../../lib/security.js';
 
 const TEST_PHONE = 'whatsapp:+244912345678';

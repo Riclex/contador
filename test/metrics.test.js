@@ -158,7 +158,7 @@ describe('getOrCreateSnapshot', () => {
 
 describe('Command - /metricas', () => {
   it('rejects non-admin users', async () => {
-    const { handleMetricas } = await import('../lib/commands.js');
+    const { handleMetricas } = await import('../lib/handlers/commands.js');
     let replied = '';
     const ctx = {
       adminNumbers: [],
@@ -170,7 +170,7 @@ describe('Command - /metricas', () => {
   });
 
   it('rejects unauthorized phone numbers', async () => {
-    const { handleMetricas } = await import('../lib/commands.js');
+    const { handleMetricas } = await import('../lib/handlers/commands.js');
     let replied = '';
     const ctx = {
       adminNumbers: ['whatsapp:+244999999999'],
@@ -184,7 +184,7 @@ describe('Command - /metricas', () => {
 
 describe('COMMANDS set includes /metricas', () => {
   it('has metricas in the COMMANDS set', async () => {
-    const { COMMANDS } = await import('../lib/commands.js');
+    const { COMMANDS } = await import('../lib/handlers/commands.js');
     assert.ok(COMMANDS.has('/metricas'));
   });
 });
