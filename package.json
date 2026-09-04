@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "main": "index.js",
   "type": "module",
+  "overrides": {
+    "qs": "6.16.0"
+  },
   "scripts": {
     "start": "node index.js",
     "test": "node --test test/*.test.js",
