@@ -1,10 +1,10 @@
-# Política de Privacidade - Contador
+# Política de Privacidade - Contabot
 
 **Última atualização:** 9 de Maio de 2026
 
 ## 1. Introdução
 
-O **Contador** é um assistente financeiro via WhatsApp que permite aos usuários registrar vendas, gastos e dívidas usando linguagem natural em Português. Esta Política de Privacidade explica como coletamos, usamos, armazenamos e protegemos seus dados pessoais em conformidade com a Lei da Protecção de Dados Pessoais de Angola (Lei nº 22/11).
+O **Contabot** é um assistente financeiro via WhatsApp que permite aos usuários registrar vendas, gastos e dívidas usando linguagem natural em Português. Esta Política de Privacidade explica como coletamos, usamos, armazenamos e protegemos seus dados pessoais em conformidade com a Lei da Protecção de Dados Pessoais de Angola (Lei nº 22/11).
 
 ## 2. Dados Coletados
 
@@ -46,7 +46,7 @@ Seus dados são processados exclusivamente para:
 
 ## 4. Base Legal (Lei 22/11)
 
-O processamento de dados pessoais no Contador é baseado em:
+O processamento de dados pessoais no Contabot é baseado em:
 
 ### 4.1 Consentimento Explícito
 - **Artigo 11º da Lei 22/11**: O tratamento de dados pessoais é lícito quando o titular der o seu consentimento livre, específico, informado e inequívoco.
@@ -115,7 +115,7 @@ Implementamos as seguintes medidas técnicas e organizacionais:
 
 ### 6.2 Dados NÃO São Vendidos
 
-O Contador **NÃO vende, aluga ou comercializa** dados pessoais com terceiros para fins de marketing ou publicidade.
+O Contabot **NÃO vende, aluga ou comercializa** dados pessoais com terceiros para fins de marketing ou publicidade.
 
 ### 6.3 Transferências Internacionais
 
@@ -156,5 +156,5 @@ Em caso de violação de dados pessoais, os usuários podem apresentar reclamaç
 
 ---
 
-**Contador** - Assistente Financeiro via WhatsApp
+**Contabot** - Assistente Financeiro via WhatsApp
 *Desenvolvido com foco em privacidade e conformidade*

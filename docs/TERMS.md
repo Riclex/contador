@@ -1,10 +1,10 @@
-# Termos de Uso - Contador
+# Termos de Uso - Contabot
 
 **Última atualização:** 9 de Maio de 2026
 
 ## 1. Descrição do Serviço
 
-O **Contador** é um assistente financeiro baseado em WhatsApp que permite aos usuários:
+O **Contabot** é um assistente financeiro baseado em WhatsApp que permite aos usuários:
 
 - Registrar transações de renda e despesas usando linguagem natural em Português
 - Rastrear dívidas entre usuários e terceiros
@@ -18,7 +18,7 @@ O serviço é fornecido através da integração com a API do WhatsApp (Twilio) 
 
 ## 2. Aceitação dos Termos
 
-Ao usar o Contador, você concorda com estes Termos de Uso. Se não concordar, não utilize o serviço e solicite a exclusão dos seus dados através do comando `/apagar`.
+Ao usar o Contabot, você concorda com estes Termos de Uso. Se não concordar, não utilize o serviço e solicite a exclusão dos seus dados através do comando `/apagar`.
 
 ## 3. Responsabilidades do Usuário
 
@@ -36,7 +36,7 @@ Ao registrar dívidas que envolvam outras pessoas:
 
 - Você declara ter **autorização** da pessoa para registrar seu nome
 - Você é responsável por **não difamar ou prejudicar** terceiros
-- O Contador não media disputas sobre dívidas registradas
+- O Contabot não media disputas sobre dívidas registradas
 
 ### 3.3 Uso Adequado
 
@@ -51,7 +51,7 @@ Você concorda em **NÃO**:
 
 ### 4.1 Fornecimento "Como Está"
 
-O Contador é fornecido **"AS IS" (como está)** e **"AS AVAILABLE" (conforme disponível)**, sem garantias de qualquer tipo, expressas ou implícitas.
+O Contabot é fornecido **"AS IS" (como está)** e **"AS AVAILABLE" (conforme disponível)**, sem garantias de qualquer tipo, expressas ou implícitas.
 
 ### 4.2 Interrupções do Serviço
 
@@ -80,7 +80,7 @@ Podemos, a nosso critério:
 
 ### 5.1 Não é Instituição Financeira
 
-O Contador **NÃO é uma instituição financeira regulamentada** e:
+O Contabot **NÃO é uma instituição financeira regulamentada** e:
 
 - Não fornece serviços bancários ou de pagamento
 - Não emite recibos ou documentos fiscais válidos
@@ -89,7 +89,7 @@ O Contador **NÃO é uma instituição financeira regulamentada** e:
 
 ### 5.2 Isenção de Danos
 
-O Contador **NÃO será responsável** por:
+O Contabot **NÃO será responsável** por:
 
 - Perdas financeiras baseadas em dados fornecidos pelo bot
 - Erros de cálculo ou omissão de transações
@@ -109,7 +109,7 @@ Você é responsável por:
 
 ### 6.1 Plano Atual (MVP)
 
-Atualmente, o Contador é oferecido **gratuitamente** em fase MVP (Minimum Viable Product).
+Atualmente, o Contabot é oferecido **gratuitamente** em fase MVP (Minimum Viable Product).
 
 ### 6.2 Planos Futuros
 
@@ -123,7 +123,7 @@ Qualquer alteração de preços será comunicada com **30 dias de antecedência*
 
 ## 7. Propriedade Intelectual
 
-Todo o conteúdo, código, design e funcionalidades do Contador são de propriedade dos desenvolvedores, exceto:
+Todo o conteúdo, código, design e funcionalidades do Contabot são de propriedade dos desenvolvedores, exceto:
 
 - Dados do usuário (de sua propriedade, sob sua controle)
 - APIs de terceiros (Twilio, OpenAI, MongoDB) sob suas respectivas licenças
@@ -181,7 +181,7 @@ Você não pode ceder ou transferir seus direitos sob estes Termos. A administra
 
 ### 11.4 Relação entre as Partes
 
-Nada nestes Termos cria uma parceria, joint venture ou relação de emprego entre você e o Contador.
+Nada nestes Termos cria uma parceria, joint venture ou relação de emprego entre você e o Contabot.
 
 ---
 
@@ -194,5 +194,5 @@ Para questões sobre estes Termos de Uso:
 
 ---
 
-**Contador** - Assistente Financeiro via WhatsApp
+**Contabot** - Assistente Financeiro via WhatsApp
 *Uso pessoal e não comercial*
