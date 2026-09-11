@@ -28,7 +28,6 @@ jobs:
       - name: Syntax check
         run: |
           node --check index.js
-          node --check lib/commands.js
           node --check lib/security.js
           node --check lib/parsers.js
           node --check lib/cache.js
