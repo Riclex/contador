@@ -41,3 +41,6 @@ test-*.js
 # Build output
 dist/
 build/
+
+# Onboarding QR assets (regenerated locally)
+docs/qr/
